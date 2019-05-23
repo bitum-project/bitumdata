@@ -658,7 +658,7 @@ func loadConfig() (*config, error) {
 }
 
 // netName returns the name used when referring to a bitum network. TestNet
-// correctly returns "testnet", but not TestNet3. This function may be removed
+// correctly returns "testnet", but not TestNet. This function may be removed
 // after testnet2 is ancient history.
 func netName(chainParams *netparams.Params) string {
 	// The following switch is to ensure this code is not built for testnet2, as
