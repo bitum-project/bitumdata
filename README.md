@@ -534,7 +534,7 @@ the `/api` path prefix.
 
 | Best block           | Path                                | Type                                  |
 | -------------------- | ----------------------------------- | ------------------------------------- |
-| Summary              | `/block/best?txtotals=[true|false]` | `types.BlockDataBasic`                |
+| Summary              | `/block/best?txtotals=[true\|false]` | `types.BlockDataBasic`                |
 | Stake info           | `/block/best/pos`                   | `types.StakeInfoExtended`             |
 | Header               | `/block/best/header`                | `bitumjson.GetBlockHeaderVerboseResult` |
 | Raw Header (hex)     | `/block/best/header/raw`            | `string`                              |
