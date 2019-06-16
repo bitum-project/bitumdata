@@ -254,8 +254,8 @@ desirable to set the "pre" and "dev" values to different strings, such as
 
 ```sh
 GO111MODULE=on go build -o bitumdata -v -ldflags \
-    "-X github.com/bitum-project/bitumdata/v5/version.appPreRelease=beta \
-     -X github.com/bitum-project/bitumdata/v5/version.appBuild=`git rev-parse --short HEAD`"
+    "-X github.com/bitum-project/bitumdata/version.appPreRelease=beta \
+     -X github.com/bitum-project/bitumdata/version.appBuild=`git rev-parse --short HEAD`"
 ```
 
 This produces a string like `bitumdata version 4.0.0-beta+25777e23 (Go version go1.12.1)`.
