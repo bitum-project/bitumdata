@@ -25,11 +25,11 @@ const (
 const (
 	AppName  string = "bitumdata"
 	AppMajor uint   = 5
-	AppMinor uint   = 0
+	AppMinor uint   = 1
 	AppPatch uint   = 0
 )
 
-// go build -v -o bitumdata -ldflags "-X github.com/bitum-project/bitumdata/version.appPreRelease= -X github.com/bitum-project/bitumdata/version.appBuild=`git rev-parse --short HEAD`"
+// go build -v -ldflags "-X github.com/bitum-project/bitumdata/version.appPreRelease= -X github.com/bitum-project/bitumdata/version.appBuild=`git rev-parse --short HEAD`"
 var (
 	// appPreRelease is defined as a variable so it can be overridden during the
 	// build process. It MUST only contain characters from semanticAlphabet per

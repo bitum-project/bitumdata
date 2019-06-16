@@ -1,11 +1,10 @@
-// Copyright (c) 2018, The Bitum developers
+// Copyright (c) 2018-2019, The Bitum developers
 // Copyright (c) 2017, The bitumdata developers
 // See LICENSE for details.
 
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -132,10 +131,15 @@ func mainCore() error {
 		return err
 	}
 
+	var piParser bitumpg.ProposalsFetcher
+	if parser != nil {
+		piParser = parser
+	}
+
 	// Construct a ChainDB without a stakeDB to allow quick dropping of tables.
 	mpChecker := rpcutils.NewMempoolAddressChecker(client, activeChain)
 	db, err := bitumpg.NewChainDB(&dbi, activeChain, nil, false, cfg.HidePGConfig, 0,
-		mpChecker, parser, client)
+		mpChecker, piParser, client)
 	if db != nil {
 		defer db.Close()
 	}
@@ -189,13 +193,11 @@ func mainCore() error {
 	// Check current height of DB
 	lastBlock, err := db.HeightDB()
 	if err != nil {
-		if err == sql.ErrNoRows {
-			lastBlock = -1
-			log.Info("blocks table is empty, starting fresh.")
-		} else {
-			log.Errorln("RetrieveBestBlockHeight:", err)
-			return err
-		}
+		log.Errorln("RetrieveBestBlockHeight:", err)
+		return err
+	}
+	if lastBlock == -1 {
+		log.Info("tables are empty, starting fresh.")
 	}
 
 	// Start waiting for the interrupt signal

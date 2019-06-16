@@ -14,8 +14,8 @@ import (
 
 func TestTestNetName(t *testing.T) {
 	netName := netName(&chaincfg.TestNetParams)
-	if netName != "Testnet" {
-		t.Errorf(`Net name not "Testnet": %s`, netName)
+	if netName != testnetNetName {
+		t.Errorf(`Net name not "%s": %s`, testnetNetName, netName)
 	}
 }
 

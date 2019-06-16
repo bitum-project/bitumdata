@@ -1,3 +1,7 @@
+// Copyright (c) 2018-2019, The Bitum developers
+// Copyright (c) 2017, Jonathan Chappelow
+// See LICENSE for details.
+
 package internal
 
 import (
@@ -6,6 +10,7 @@ import (
 	"github.com/bitum-project/bitumd/blockchain/stake"
 )
 
+// These queries relate primarily to the "transactions" table.
 const (
 	CreateTransactionTable = `CREATE TABLE IF NOT EXISTS transactions (
 		id SERIAL8 PRIMARY KEY,
@@ -82,18 +87,33 @@ const (
 			FROM transactions) t
 		WHERE t.rnum > 1);`
 
+	SelectTxDupIDs = `WITH dups AS (
+		SELECT array_agg(id) AS ids
+		FROM transactions
+		GROUP BY tx_hash, block_hash 
+		HAVING count(id)>1
+	)
+	SELECT array_agg(dupids) FROM (
+		SELECT unnest(ids) AS dupids
+		FROM dups
+		ORDER BY dupids DESC
+	) AS _;`
+
+	DeleteTxRows = `DELETE FROM transactions
+		WHERE id = ANY($1);`
+
 	// IndexTransactionTableOnHashes creates the unique index uix_tx_hashes on
 	// (tx_hash, block_hash).
 	IndexTransactionTableOnHashes = `CREATE UNIQUE INDEX ` + IndexOfTransactionsTableOnHashes +
 		` ON transactions(tx_hash, block_hash);`
-	DeindexTransactionTableOnHashes = `DROP INDEX ` + IndexOfTransactionsTableOnHashes + `;`
+	DeindexTransactionTableOnHashes = `DROP INDEX ` + IndexOfTransactionsTableOnHashes + ` CASCADE;`
 
 	// Investigate removing this. block_hash is already indexed. It would be
 	// unique with just (block_hash, block_index). And tree is likely not
 	// important to index.  NEEDS TESTING BEFORE REMOVAL.
 	IndexTransactionTableOnBlockIn = `CREATE UNIQUE INDEX ` + IndexOfTransactionsTableOnBlockInd +
 		` ON transactions(block_hash, block_index, tree);`
-	DeindexTransactionTableOnBlockIn = `DROP INDEX ` + IndexOfTransactionsTableOnBlockInd + `;`
+	DeindexTransactionTableOnBlockIn = `DROP INDEX ` + IndexOfTransactionsTableOnBlockInd + ` CASCADE;`
 
 	SelectTxByHash = `SELECT id, block_hash, block_index, tree
 		FROM transactions
@@ -190,12 +210,13 @@ const (
 		) b
 		WHERE block_hash = b.hash;`
 
-	SelectTicketsByType = `SELECT
-		width_bucket(num_vout, array[3, 5, 6]) as ticket_bucket,
-		count(*)
-		FROM transactions JOIN tickets
-		ON transactions.id=purchase_tx_db_id WHERE pool_status=0
-		AND tickets.is_mainchain = TRUE GROUP BY ticket_bucket;`
+	SelectTicketsByType = `SELECT DISTINCT num_vout, COUNT(*)
+		FROM transactions
+		JOIN tickets
+		ON transactions.id=purchase_tx_db_id
+		WHERE pool_status=0
+		AND tickets.is_mainchain = TRUE
+		GROUP BY num_vout;`
 
 	SelectTxnByDbID = `SELECT block_hash, block_height, tx_hash FROM transactions WHERE id = $1;`
 
@@ -242,19 +263,6 @@ var (
 		GROUP BY count
 		ORDER BY count;`
 )
-
-// func makeTxInsertStatement(voutDbIDs, vinDbIDs []uint64, vouts []*dbtypes.Vout, checked bool) string {
-// 	voutDbIDsBIGINT := makeARRAYOfBIGINTs(voutDbIDs)
-// 	vinDbIDsBIGINT := makeARRAYOfBIGINTs(vinDbIDs)
-// 	voutCompositeARRAY := makeARRAYOfVouts(vouts)
-// 	var insert string
-// 	if checked {
-// 		insert = insertTxRowChecked
-// 	} else {
-// 		insert = insertTxRow
-// 	}
-// 	return fmt.Sprintf(insert, voutDbIDsBIGINT, voutCompositeARRAY, vinDbIDsBIGINT)
-// }
 
 // MakeTxInsertStatement returns the appropriate transaction insert statement
 // for the desired conflict checking and handling behavior. For checked=false,

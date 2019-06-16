@@ -78,13 +78,6 @@ type VerboseTransactionGetter interface {
 	GetRawTransactionVerboseAsync(txHash *chainhash.Hash) rpcclient.FutureGetRawTransactionVerboseResult
 }
 
-// BlockWatchedTx contains, for a certain block, the transactions for certain
-// watched addresses
-type BlockWatchedTx struct {
-	BlockHeight   int64
-	TxsForAddress map[string][]*bitumutil.Tx
-}
-
 // TxAction is what is happening to the transaction (mined or inserted into
 // mempool).
 type TxAction int32
@@ -316,7 +309,7 @@ func TxOutpointsByAddr(txAddrOuts MempoolAddressStore, msgTx *wire.MsgTx, params
 // transaction are counted and returned. The addresses in the previous outpoints
 // are listed in the output addrs map, where the value of the stored bool
 // indicates the address is new to the MempoolAddressStore.
-func TxPrevOutsByAddr(txAddrOuts MempoolAddressStore, txnsStore TxnsStore, msgTx *wire.MsgTx, c VerboseTransactionGetter, params *chaincfg.Params) (newPrevOuts int, addrs map[string]bool) {
+func TxPrevOutsByAddr(txAddrOuts MempoolAddressStore, txnsStore TxnsStore, msgTx *wire.MsgTx, c VerboseTransactionGetter, params *chaincfg.Params) (newPrevOuts int, addrs map[string]bool, valsIn []int64) {
 	if txAddrOuts == nil {
 		panic("TxPrevOutAddresses: input map must be initialized: map[string]*AddressOutpoints")
 	}
@@ -343,6 +336,7 @@ func TxPrevOutsByAddr(txAddrOuts MempoolAddressStore, txnsStore TxnsStore, msgTx
 	}
 
 	addrs = make(map[string]bool)
+	valsIn = make([]int64, len(msgTx.TxIn))
 
 	// For each TxIn of this transaction, inspect the previous outpoint.
 	for i := range promisesGetRawTransaction {
@@ -370,6 +364,10 @@ func TxPrevOutsByAddr(txAddrOuts MempoolAddressStore, txnsStore TxnsStore, msgTx
 
 		// prevOut.Index indicates which output.
 		txOut := prevTx.TxOut[prevOut.Index]
+
+		// Get the values.
+		valsIn[inIdx] = txOut.Value
+
 		// Extract the addresses from this output's PkScript.
 		_, txAddrs, _, err := txscript.ExtractPkScriptAddrs(
 			txOut.Version, txOut.PkScript, params)
@@ -673,15 +671,14 @@ func OutPointAddresses(outPoint *wire.OutPoint, c RawTransactionGetter,
 // OutPointAddressesFromString is the same as OutPointAddresses, but it takes
 // the outpoint as the tx string, vout index, and tree.
 func OutPointAddressesFromString(txid string, index uint32, tree int8,
-	c RawTransactionGetter, params *chaincfg.Params) ([]string, error) {
+	c RawTransactionGetter, params *chaincfg.Params) ([]string, bitumutil.Amount, error) {
 	hash, err := chainhash.NewHashFromStr(txid)
 	if err != nil {
-		return nil, fmt.Errorf("Invalid hash %s", txid)
+		return nil, 0, fmt.Errorf("Invalid hash %s", txid)
 	}
 
 	outPoint := wire.NewOutPoint(hash, index, tree)
-	outPointAddress, _, err := OutPointAddresses(outPoint, c, params)
-	return outPointAddress, err
+	return OutPointAddresses(outPoint, c, params)
 }
 
 // MedianAmount gets the median Amount from a slice of Amounts
@@ -998,6 +995,15 @@ func MsgTxFromHex(txhex string) (*wire.MsgTx, error) {
 	return msgTx, nil
 }
 
+// MsgTxToHex returns a transaction hex string from a wire.MsgTx struct.
+func MsgTxToHex(msgTx *wire.MsgTx) (string, error) {
+	var hexBuilder strings.Builder
+	if err := msgTx.Serialize(hex.NewEncoder(&hexBuilder)); err != nil {
+		return "", err
+	}
+	return hexBuilder.String(), nil
+}
+
 // DetermineTxTypeString returns a string representing the transaction type given
 // a wire.MsgTx struct
 func DetermineTxTypeString(msgTx *wire.MsgTx) string {
@@ -1178,11 +1184,14 @@ var (
 	AddressErrorWrongNet     AddressError = errors.New("wrong network")
 	AddressErrorDecodeFailed AddressError = errors.New("decoding failed")
 	AddressErrorUnknown      AddressError = errors.New("unknown error")
-	AddressErrorUnsupported  AddressError = errors.New("recognized, but unsuported address type")
+	AddressErrorUnsupported  AddressError = errors.New("recognized, but unsupported address type")
 )
 
+// AddressType is used to label type of an address as returned by
+// base58.CheckDecode.
 type AddressType int
 
+// These are the AddressType values, as returned by AddressValidation.
 const (
 	AddressTypeP2PK = iota
 	AddressTypeP2PKH

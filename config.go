@@ -68,12 +68,12 @@ var (
 	defaultPoliteiaAPIURl    = "https://proposals.bitum.io"
 	defaultChartsCacheDump   = "chartscache.gob"
 
-	defaultPGHost                       = "127.0.0.1:5432"
-	defaultPGUser                       = "bitumdata"
-	defaultPGPass                       = ""
-	defaultPGDBName                     = "bitumdata"
-	defaultPGQueryTimeout time.Duration = time.Hour
-	defaultAddrCacheCap                 = 1 << 27 // 128 MiB
+	defaultPGHost         = "127.0.0.1:5432"
+	defaultPGUser         = "bitumdata"
+	defaultPGPass         = ""
+	defaultPGDBName       = "bitumdata"
+	defaultPGQueryTimeout = time.Hour
+	defaultAddrCacheCap   = 1 << 27 // 128 MiB
 
 	defaultExchangeIndex     = "USD"
 	defaultDisabledExchanges = "huobi,dragonex"
@@ -113,8 +113,8 @@ type config struct {
 	CompressAPI         bool    `long:"compress-api" description:"Use compression for a number of endpoints with commonly large responses."`
 
 	// Data I/O
-	MempoolMinInterval int    `long:"mp-min-interval" description:"The minimum time in seconds between mempool reports, regarless of number of new tickets seen." env:"BITUMDATA_MEMPOOL_MIN_INTERVAL"`
-	MempoolMaxInterval int    `long:"mp-max-interval" description:"The maximum time in seconds between mempool reports (within a couple seconds), regarless of number of new tickets seen." env:"BITUMDATA_MEMPOOL_MAX_INTERVAL"`
+	MempoolMinInterval int    `long:"mp-min-interval" description:"The minimum time in seconds between mempool reports, regardless of number of new tickets seen." env:"BITUMDATA_MEMPOOL_MIN_INTERVAL"`
+	MempoolMaxInterval int    `long:"mp-max-interval" description:"The maximum time in seconds between mempool reports (within a couple seconds), regardless of number of new tickets seen." env:"BITUMDATA_MEMPOOL_MAX_INTERVAL"`
 	MPTriggerTickets   int    `long:"mp-ticket-trigger" description:"The number minimum number of new tickets that must be seen to trigger a new mempool report." env:"BITUMDATA_MP_TRIGGER_TICKETS"`
 	DBFileName         string `long:"dbfile" description:"SQLite DB file name (default is bitumdata.sqlt.db)." env:"BITUMDATA_SQLITE_DB_FILE_NAME"`
 	SQLiteMaxConns     int    `long:"sqlite-max-conns" description:"The maximum number of open connections to the SQLite database. By default there is no limit."`
@@ -122,8 +122,9 @@ type config struct {
 	ProposalsFileName  string `long:"proposalsdbfile" description:"Proposals DB file name (default is proposals.db)." env:"BITUMDATA_PROPOSALS_DB_FILE_NAME"`
 	PoliteiaAPIURL     string `long:"politeiaurl" description:"Defines the root API politeia URL (defaults to https://proposals.bitum.io)."`
 	ChartsCacheDump    string `long:"chartscache" description:"Defines the file name that holds the charts cache data on system exit."`
-	PiPropRepoOwner    string `long:"piproposalsowner" description:"Defines the owner to the github repo where politeia's proposals are pushed."`
-	PiPropRepoName     string `long:"piproposalsrepo" description:"Defines the name of the github repo where politeia's proposals are pushed."`
+	PiPropRepoOwner    string `long:"piproposalsowner" description:"Defines the owner to the github repo where Politeia's proposals are pushed."`
+	PiPropRepoName     string `long:"piproposalsrepo" description:"Defines the name of the github repo where Politeia's proposals are pushed."`
+	DisablePiParser    bool   `long:"disable-piparser" description:"Disables the piparser tool from running."`
 
 	PurgeNBestBlocks int  `long:"purge-n-blocks" description:"Purge all data for the N best blocks, using the best block across all DBs if they are out of sync."`
 	FastSQLitePurge  bool `long:"fast-sqlite-purge" description:"Purge all data for the blocks above the specified height."`
@@ -157,7 +158,7 @@ type config struct {
 	BitumdServ         string `long:"bitumdserv" description:"Hostname/IP and port of bitumd RPC server to connect to (default localhost:9209, testnet: localhost:19209, simnet: localhost:19556)" env:"BITUMDATA_BITUMD_URL"`
 	BitumdCert         string `long:"bitumdcert" description:"File containing the bitumd certificate file" env:"BITUMDATA_BITUMD_CERT"`
 	DisableDaemonTLS bool   `long:"nodaemontls" description:"Disable TLS for the daemon RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost" env:"BITUMDATA_BITUMD_DISABLE_TLS"`
-	BlockPrefetch    bool   `long:"bitumd-block-prefetch" short:"P" description:"Pre-fetch blocks from bitumd during startup sync."`
+	NoBlockPrefetch  bool   `long:"no-bitumd-block-prefetch" description:"Disable block pre-fetch from bitumd during startup sync."`
 
 	// ExchangeBot settings
 	EnableExchangeBot bool   `long:"exchange-monitor" description:"Enable the exchange monitor" env:"BITUMDATA_MONITOR_EXCHANGES"`
@@ -303,7 +304,7 @@ func supportedSubsystems() []string {
 		subsystems = append(subsystems, subsysID)
 	}
 
-	// Sort the subsytems for stable display.
+	// Sort the subsystems for stable display.
 	sort.Strings(subsystems)
 	return subsystems
 }
@@ -343,7 +344,7 @@ func parseAndSetDebugLevels(debugLevel string) error {
 		// Validate subsystem.
 		if _, exists := subsystemLoggers[subsysID]; !exists {
 			str := "The specified subsystem [%v] is invalid -- " +
-				"supported subsytems %v"
+				"supported subsystems %v"
 			return fmt.Errorf(str, subsysID, supportedSubsystems())
 		}
 
@@ -518,6 +519,9 @@ func loadConfig() (*config, error) {
 	if cfg.SimNet {
 		activeNet = &netparams.SimNetParams
 		activeChain = &chaincfg.SimNetParams
+
+		// If on simnet, disable piparser tool automatically.
+		cfg.DisablePiParser = true
 		numNets++
 	}
 	if numNets > 1 {
@@ -658,7 +662,7 @@ func loadConfig() (*config, error) {
 }
 
 // netName returns the name used when referring to a bitum network. TestNet
-// correctly returns "testnet", but not TestNet. This function may be removed
+// correctly returns "testnet". This function may be removed
 // after testnet2 is ancient history.
 func netName(chainParams *netparams.Params) string {
 	// The following switch is to ensure this code is not built for testnet2, as

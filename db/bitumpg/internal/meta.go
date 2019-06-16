@@ -1,5 +1,9 @@
+// Copyright (c) 2019, The Bitum developers
+// See LICENSE for details.
+
 package internal
 
+// These queries relate primarily to the "meta" table.
 const (
 	CreateMetaTable = `CREATE TABLE IF NOT EXISTS meta (
 		net_name TEXT,
@@ -31,6 +35,8 @@ const (
 
 	SetMetaDBBestBlock = `UPDATE meta
 		SET best_block_height = $1, best_block_hash = $2;`
+
+	SelectMetaDBIbdComplete = `SELECT ibd_complete FROM meta;`
 
 	SetMetaDBIbdComplete = `UPDATE meta
 		SET ibd_complete = $1;`

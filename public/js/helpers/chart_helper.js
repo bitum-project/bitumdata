@@ -1,11 +1,11 @@
 // shared functions for related to charts
 
 export function barChartPlotter (e) {
-  plotChart(e, fitWidth(e.points))
+  plotChart(e, findWidth(findMinSep(e.points, Infinity)))
 }
 
-function fitWidth (points) {
-  return Math.floor(2.0 / 3 * findMinSep(points, Infinity))
+function findWidth (sep) {
+  return Math.floor(2.0 / 3 * sep * 10000) / 10000 // to 4 decimal places
 }
 
 function findMinSep (points, minSep) {
@@ -16,10 +16,15 @@ function findMinSep (points, minSep) {
   return minSep
 }
 
+function findLineWidth (barWidth) {
+  var width = 0.2 + (0.08 * barWidth)
+  return width > 1 ? 1 : width
+}
+
 export function sizedBarPlotter (binSize) {
   return (e) => {
     let canvasBin = e.dygraph.toDomXCoord(binSize) - e.dygraph.toDomXCoord(0)
-    plotChart(e, Math.floor(2.0 / 3 * canvasBin))
+    plotChart(e, findWidth(canvasBin))
   }
 }
 
@@ -28,8 +33,10 @@ function plotChart (e, barWidth) {
   var yBottom = e.dygraph.toDomYCoord(0)
 
   ctx.fillStyle = e.color
+  ctx.lineWidth = findLineWidth(barWidth)
 
   e.points.map((p) => {
+    if (p.yval === 0) return
     var x = p.canvasx - barWidth / 2
     var height = yBottom - p.canvasy
     ctx.fillRect(x, p.canvasy, barWidth, height)
@@ -47,15 +54,17 @@ export function multiColumnBarPlotter (e) {
 
   var minSep = Infinity
   sets.map((bar) => { minSep = findMinSep(bar, minSep) })
-  var barWidth = Math.floor(2.0 / 3 * minSep)
+  var barWidth = findWidth(minSep)
   var strokeColors = g.getColors()
   var fillColors = g.getOption('fillColors')
+  ctx.lineWidth = findLineWidth(barWidth)
 
   sets.map((bar, i) => {
     ctx.fillStyle = fillColors[i]
     ctx.strokeStyle = strokeColors[i]
 
     bar.map((p) => {
+      if (p.yval === 0) return
       var xLeft = p.canvasx - (barWidth / 2) * (1 - i / (sets.length - 1))
       var height = yBottom - p.canvasy
       var width = barWidth / sets.length
@@ -86,7 +95,7 @@ export function padPoints (pts, binSize, sustain) {
   pts.push(back)
 }
 
-function isEqual (a, b) {
+export function isEqual (a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return false
   var i = a.length
   if (i !== b.length) return false

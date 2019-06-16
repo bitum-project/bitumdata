@@ -26,7 +26,7 @@ var MainNetParams = Params{
 }
 
 // TestNetParams contains parameters specific running bitumwallet and
-// bitumd on the test network (version 3) (wire.TestNet).
+// bitumd on the test network (wire.TestNet).
 var TestNetParams = Params{
 	Params:            &chaincfg.TestNetParams,
 	JSONRPCClientPort: "19209",

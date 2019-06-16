@@ -4,9 +4,9 @@
 // Package cache provides a number of types and functions for caching Bitum
 // address data, and filtering AddressRow slices. The type AddressCache may
 // store the following data for an address: balance (see
-// db/types.AddressBalance), address table row data (see db/types.AddressRow),
-// merged address table row data, UTXOs (see api/types.AddressTxnOutput), and
-// "metrics" (see db/types.AddressMetrics).
+// db/dbtypes.AddressBalance), address table row data (see
+// db/dbtypes.AddressRow), merged address table row data, UTXOs (see
+// db/dbtypes.AddressTxnOutput), and "metrics" (see db/dbtypes.AddressMetrics).
 package cache
 
 import (
@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/bitum-project/bitumd/chaincfg/chainhash"
-	apitypes "github.com/bitum-project/bitumdata/api/types"
 	"github.com/bitum-project/bitumdata/db/dbtypes"
 )
 
@@ -24,8 +23,10 @@ const (
 	// have cached data, regardless of the number of rows.
 	addressCapacity = 1024
 
-	// The size of a AddressTxnOutput varies, but it is roughly 256 bytes.
-	approxTxnOutSize = 256
+	// The size of a dbtypes.AddressTxnOutput varies since address and pkScript
+	// lengths vary, but it is roughly 180 bytes (88 bytes for the struct and
+	// ~92 bytes for the string buffers).
+	approxTxnOutSize = 180
 
 	// Unlike address rows, which are counted precisely, UTXO limits are
 	// enforced per-address. maxUTXOsPerAddr is set to require at most 128 MiB
@@ -84,21 +85,14 @@ func (cl *CacheLock) TryLock(addr string) (busy bool, wait chan struct{}, done f
 // CountCreditDebitRows returns the numbers of credit (funding) and debit
 // (!funding) address rows in a []*dbtypes.AddressRow.
 func CountCreditDebitRows(rows []*dbtypes.AddressRow) (numCredit, numDebit int) {
-	for _, r := range rows {
-		if r.IsFunding {
-			numCredit++
-		} else {
-			numDebit++
-		}
-	}
-	return
+	return dbtypes.CountCreditDebitRows(rows)
 }
 
 // CountCreditDebitRowsCompact returns the numbers of credit (funding) and debit
 // (!funding) address rows in a []dbtypes.AddressRowCompact.
-func CountCreditDebitRowsCompact(rows []dbtypes.AddressRowCompact) (numCredit, numDebit int) {
-	for i := range rows {
-		if rows[i].IsFunding {
+func CountCreditDebitRowsCompact(rows []*dbtypes.AddressRowCompact) (numCredit, numDebit int) {
+	for _, row := range rows {
+		if row.IsFunding {
 			numCredit++
 		} else {
 			numDebit++
@@ -109,9 +103,9 @@ func CountCreditDebitRowsCompact(rows []dbtypes.AddressRowCompact) (numCredit, n
 
 // CountCreditDebitRowsMerged returns the numbers of credit (funding) and debit
 // (!funding) address rows in a []dbtypes.AddressRowMerged.
-func CountCreditDebitRowsMerged(rows []dbtypes.AddressRowMerged) (numCredit, numDebit int) {
-	for i := range rows {
-		if rows[i].IsFunding() {
+func CountCreditDebitRowsMerged(rows []*dbtypes.AddressRowMerged) (numCredit, numDebit int) {
+	for _, row := range rows {
+		if row.IsFunding() {
 			numCredit++
 		} else {
 			numDebit++
@@ -120,13 +114,13 @@ func CountCreditDebitRowsMerged(rows []dbtypes.AddressRowMerged) (numCredit, num
 	return
 }
 
-func addressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtypes.AddressRowCompact {
+func addressRows(rows []*dbtypes.AddressRowCompact, N, offset int) []*dbtypes.AddressRowCompact {
 	if rows == nil {
 		return nil
 	}
 	numRows := len(rows)
 	if offset >= numRows {
-		return []dbtypes.AddressRowCompact{}
+		return []*dbtypes.AddressRowCompact{}
 	}
 
 	end := offset + N
@@ -136,16 +130,16 @@ func addressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtypes.Addr
 	if offset < end {
 		return rows[offset:end]
 	}
-	return []dbtypes.AddressRowCompact{}
+	return []*dbtypes.AddressRowCompact{}
 }
 
-func addressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []dbtypes.AddressRowMerged {
+func addressRowsMerged(rows []*dbtypes.AddressRowMerged, N, offset int) []*dbtypes.AddressRowMerged {
 	if rows == nil {
 		return nil
 	}
 	numRows := len(rows)
 	if offset >= numRows {
-		return []dbtypes.AddressRowMerged{}
+		return []*dbtypes.AddressRowMerged{}
 	}
 
 	end := offset + N
@@ -155,7 +149,7 @@ func addressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []dbtypes
 	if offset < end {
 		return rows[offset:end]
 	}
-	return []dbtypes.AddressRowMerged{}
+	return []*dbtypes.AddressRowMerged{}
 }
 
 // CreditAddressRows returns up to N credit (funding) address rows from the
@@ -165,21 +159,21 @@ func addressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []dbtypes
 // is unrecognized, in which case a nil interface is returned.
 func CreditAddressRows(rows interface{}, N, offset int) interface{} {
 	switch r := rows.(type) {
-	case []dbtypes.AddressRowCompact:
+	case []*dbtypes.AddressRowCompact:
 		return creditAddressRows(r, N, offset)
-	case []dbtypes.AddressRowMerged:
+	case []*dbtypes.AddressRowMerged:
 		return creditAddressRowsMerged(r, N, offset)
 	default:
 		return nil
 	}
 }
 
-func creditAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtypes.AddressRowCompact {
+func creditAddressRows(rows []*dbtypes.AddressRowCompact, N, offset int) []*dbtypes.AddressRowCompact {
 	if rows == nil {
 		return nil
 	}
 	if offset >= len(rows) {
-		return []dbtypes.AddressRowCompact{}
+		return []*dbtypes.AddressRowCompact{}
 	}
 
 	// Count the number of IsFunding rows in the input slice.
@@ -192,9 +186,9 @@ func creditAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtype
 	}
 
 	var skipped int
-	out := make([]dbtypes.AddressRowCompact, 0, N)
-	for i := range rows {
-		if !rows[i].IsFunding {
+	out := make([]*dbtypes.AddressRowCompact, 0, N)
+	for _, row := range rows {
+		if !row.IsFunding {
 			continue
 		}
 		if skipped < offset {
@@ -202,7 +196,7 @@ func creditAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtype
 			continue
 		}
 		// Append this row, and break the loop if we have N rows.
-		out = append(out, rows[i])
+		out = append(out, row)
 		if len(out) == N {
 			break
 		}
@@ -210,12 +204,12 @@ func creditAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtype
 	return out
 }
 
-func creditAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []dbtypes.AddressRowMerged {
+func creditAddressRowsMerged(rows []*dbtypes.AddressRowMerged, N, offset int) []*dbtypes.AddressRowMerged {
 	if rows == nil {
 		return nil
 	}
 	if offset >= len(rows) {
-		return []dbtypes.AddressRowMerged{}
+		return []*dbtypes.AddressRowMerged{}
 	}
 
 	// Count the number of IsFunding() rows in the input slice.
@@ -228,9 +222,9 @@ func creditAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []d
 	}
 
 	var skipped int
-	out := make([]dbtypes.AddressRowMerged, 0, N)
-	for i := range rows {
-		if !rows[i].IsFunding() {
+	out := make([]*dbtypes.AddressRowMerged, 0, N)
+	for _, row := range rows {
+		if !row.IsFunding() {
 			continue
 		}
 		if skipped < offset {
@@ -238,7 +232,7 @@ func creditAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []d
 			continue
 		}
 		// Append this row, and break the loop if we have N rows.
-		out = append(out, rows[i])
+		out = append(out, row)
 		if len(out) == N {
 			break
 		}
@@ -253,21 +247,21 @@ func creditAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []d
 // case a nil interface is returned.
 func DebitAddressRows(rows interface{}, N, offset int) interface{} {
 	switch r := rows.(type) {
-	case []dbtypes.AddressRowCompact:
+	case []*dbtypes.AddressRowCompact:
 		return debitAddressRows(r, N, offset)
-	case []dbtypes.AddressRowMerged:
+	case []*dbtypes.AddressRowMerged:
 		return debitAddressRowsMerged(r, N, offset)
 	default:
 		return nil
 	}
 }
 
-func debitAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtypes.AddressRowCompact {
+func debitAddressRows(rows []*dbtypes.AddressRowCompact, N, offset int) []*dbtypes.AddressRowCompact {
 	if rows == nil {
 		return nil
 	}
 	if offset >= len(rows) {
-		return []dbtypes.AddressRowCompact{}
+		return []*dbtypes.AddressRowCompact{}
 	}
 
 	// Count the number of !IsFunding rows in the input slice.
@@ -276,7 +270,7 @@ func debitAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtypes
 		N = numDebitRows
 	}
 	var skipped int
-	out := make([]dbtypes.AddressRowCompact, 0, N)
+	out := make([]*dbtypes.AddressRowCompact, 0, N)
 	for i := range rows {
 		if rows[i].IsFunding {
 			continue
@@ -294,12 +288,12 @@ func debitAddressRows(rows []dbtypes.AddressRowCompact, N, offset int) []dbtypes
 	return out
 }
 
-func debitAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []dbtypes.AddressRowMerged {
+func debitAddressRowsMerged(rows []*dbtypes.AddressRowMerged, N, offset int) []*dbtypes.AddressRowMerged {
 	if rows == nil {
 		return nil
 	}
 	if offset >= len(rows) {
-		return []dbtypes.AddressRowMerged{}
+		return []*dbtypes.AddressRowMerged{}
 	}
 
 	// Count the number of !IsFunding() rows in the input slice.
@@ -308,9 +302,9 @@ func debitAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []db
 		N = numDebitRows
 	}
 	var skipped int
-	out := make([]dbtypes.AddressRowMerged, 0, N)
-	for i := range rows {
-		if rows[i].IsFunding() {
+	out := make([]*dbtypes.AddressRowMerged, 0, N)
+	for _, row := range rows {
+		if row.IsFunding() {
 			continue
 		}
 		if skipped < offset {
@@ -318,7 +312,7 @@ func debitAddressRowsMerged(rows []dbtypes.AddressRowMerged, N, offset int) []db
 			continue
 		}
 		// Append this row, and break the loop if we have N rows.
-		out = append(out, rows[i])
+		out = append(out, row)
 		if len(out) == N {
 			break
 		}
@@ -381,8 +375,8 @@ func (th *TxHistory) Clear() {
 type AddressCacheItem struct {
 	mtx     sync.RWMutex
 	balance *dbtypes.AddressBalance
-	rows    []dbtypes.AddressRowCompact // creditDebitQuery
-	utxos   []apitypes.AddressTxnOutput
+	rows    []*dbtypes.AddressRowCompact // creditDebitQuery
+	utxos   []*dbtypes.AddressTxnOutput
 	history TxHistory
 	height  int64
 	hash    chainhash.Hash
@@ -431,8 +425,8 @@ func (d *AddressCacheItem) Balance() (*dbtypes.AddressBalance, *BlockID) {
 	return d.balance, d.blockID()
 }
 
-// UTXOs is a thread-safe accessor for the []apitypes.AddressTxnOutput.
-func (d *AddressCacheItem) UTXOs() ([]apitypes.AddressTxnOutput, *BlockID) {
+// UTXOs is a thread-safe accessor for the []*dbtypes.AddressTxnOutput.
+func (d *AddressCacheItem) UTXOs() ([]*dbtypes.AddressTxnOutput, *BlockID) {
 	d.mtx.RLock()
 	defer d.mtx.RUnlock()
 	if d.utxos == nil {
@@ -465,8 +459,8 @@ func (d *AddressCacheItem) HistoryChart(addrChart dbtypes.HistoryChart, chartGro
 	return cd, d.blockID()
 }
 
-// Rows is a thread-safe accessor for the []*dbtypes.AddressRow.
-func (d *AddressCacheItem) Rows() ([]dbtypes.AddressRowCompact, *BlockID) {
+// Rows is a thread-safe accessor for the []dbtypes.AddressRowCompact.
+func (d *AddressCacheItem) Rows() ([]*dbtypes.AddressRowCompact, *BlockID) {
 	d.mtx.RLock()
 	defer d.mtx.RUnlock()
 	if d.rows == nil {
@@ -512,9 +506,9 @@ func (d *AddressCacheItem) Transactions(N, offset int, txnView dbtypes.AddrTxnVi
 		// with requested view for the sanity checking in AddressCache
 		// (TransactionsCompact or TransactionsMerged).
 		if merged {
-			return []dbtypes.AddressRowMerged(nil), nil, nil
+			return []*dbtypes.AddressRowMerged(nil), nil, nil
 		}
-		return []dbtypes.AddressRowCompact(nil), nil, nil
+		return []*dbtypes.AddressRowCompact(nil), nil, nil
 	}
 
 	blockID := d.blockID()
@@ -523,21 +517,21 @@ func (d *AddressCacheItem) Transactions(N, offset int, txnView dbtypes.AddrTxnVi
 	if N == 0 || numRows == 0 || offset >= numRows {
 		// Not a cache miss, just no requested or matching data.
 		if merged {
-			return []dbtypes.AddressRowMerged{}, blockID, nil
+			return []*dbtypes.AddressRowMerged{}, blockID, nil
 		}
-		return []dbtypes.AddressRowCompact{}, blockID, nil
+		return []*dbtypes.AddressRowCompact{}, blockID, nil
 	}
 
 	switch txnView {
 	case dbtypes.AddrTxnAll:
-		// []dbtypes.AddressRowCompact
+		// []*dbtypes.AddressRowCompact
 		return addressRows(d.rows, N, offset), blockID, nil
 	case dbtypes.AddrTxnCredit:
 		return creditAddressRows(d.rows, N, offset), blockID, nil
 	case dbtypes.AddrTxnDebit:
 		return debitAddressRows(d.rows, N, offset), blockID, nil
 	case dbtypes.AddrMergedTxn, dbtypes.AddrMergedTxnCredit, dbtypes.AddrMergedTxnDebit:
-		// []dbtypes.AddressRowMerged
+		// []*dbtypes.AddressRowMerged
 		return dbtypes.MergeRowsCompactRange(d.rows, N, offset, txnView), blockID, nil
 	default:
 		// This should already be caught by IsMerged err check.
@@ -562,16 +556,16 @@ func (d *AddressCacheItem) setBlock(block BlockID) {
 
 // SetRows updates the cache item for the given non-merged AddressRow slice
 // valid at the given BlockID.
-func (d *AddressCacheItem) SetRows(block BlockID, rows []dbtypes.AddressRowCompact) {
+func (d *AddressCacheItem) SetRows(block BlockID, rows []*dbtypes.AddressRowCompact) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	d.setBlock(block)
 	d.rows = rows
 }
 
-// SetUTXOs updates the cache item for the given AddressTxnOutput slice valid at
-// the given BlockID.
-func (d *AddressCacheItem) SetUTXOs(block BlockID, utxos []apitypes.AddressTxnOutput) {
+// SetUTXOs updates the cache item for the given *AddressTxnOutput slice valid
+// at the given BlockID.
+func (d *AddressCacheItem) SetUTXOs(block BlockID, utxos []*dbtypes.AddressTxnOutput) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	d.setBlock(block)
@@ -587,93 +581,89 @@ func (d *AddressCacheItem) SetBalance(block BlockID, balance *dbtypes.AddressBal
 	d.balance = balance
 }
 
-// CacheCounts stores cache hits and misses.
-type CacheCounts struct {
-	Hits, Misses int
-}
-
+// cacheCounts stores cache hits and misses.
 type cacheCounts struct {
 	sync.Mutex
-	CacheCounts
+	hits, misses int
 }
 
-// CacheMetrics is a collection of CacheCounts for the various cached data.
-type CacheMetrics struct {
+// cacheMetrics is a collection of CacheCounts for the various cached data.
+type cacheMetrics struct {
 	rowMetrics     cacheCounts
 	utxoMetrics    cacheCounts
 	balanceMetrics cacheCounts
 	historyMetrics cacheCounts
 }
 
-func (cm *CacheMetrics) RowStats() (hits, misses int) {
+func (cm *cacheMetrics) rowStats() (hits, misses int) {
 	cm.rowMetrics.Lock()
 	defer cm.rowMetrics.Unlock()
-	return cm.rowMetrics.Hits, cm.rowMetrics.Misses
+	return cm.rowMetrics.hits, cm.rowMetrics.misses
 }
 
-func (cm *CacheMetrics) BalanceStats() (hits, misses int) {
+func (cm *cacheMetrics) balanceStats() (hits, misses int) {
 	cm.balanceMetrics.Lock()
 	defer cm.balanceMetrics.Unlock()
-	return cm.balanceMetrics.Hits, cm.balanceMetrics.Misses
+	return cm.balanceMetrics.hits, cm.balanceMetrics.misses
 }
 
-func (cm *CacheMetrics) UtxoStats() (hits, misses int) {
+func (cm *cacheMetrics) utxoStats() (hits, misses int) {
 	cm.utxoMetrics.Lock()
 	defer cm.utxoMetrics.Unlock()
-	return cm.utxoMetrics.Hits, cm.utxoMetrics.Misses
+	return cm.utxoMetrics.hits, cm.utxoMetrics.misses
 }
 
-func (cm *CacheMetrics) HistoryStats() (hits, misses int) {
+func (cm *cacheMetrics) historyStats() (hits, misses int) {
 	cm.historyMetrics.Lock()
 	defer cm.historyMetrics.Unlock()
-	return cm.historyMetrics.Hits, cm.historyMetrics.Misses
+	return cm.historyMetrics.hits, cm.historyMetrics.misses
 }
 
-func (cm *CacheMetrics) RowHit() {
+func (cm *cacheMetrics) rowHit() {
 	cm.rowMetrics.Lock()
-	cm.rowMetrics.Hits++
+	cm.rowMetrics.hits++
 	cm.rowMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) RowMiss() {
+func (cm *cacheMetrics) rowMiss() {
 	cm.rowMetrics.Lock()
-	cm.rowMetrics.Misses++
+	cm.rowMetrics.misses++
 	cm.rowMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) UtxoHit() {
+func (cm *cacheMetrics) utxoHit() {
 	cm.utxoMetrics.Lock()
-	cm.utxoMetrics.Hits++
+	cm.utxoMetrics.hits++
 	cm.utxoMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) UtxoMiss() {
+func (cm *cacheMetrics) utxoMiss() {
 	cm.utxoMetrics.Lock()
-	cm.utxoMetrics.Misses++
+	cm.utxoMetrics.misses++
 	cm.utxoMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) BalanceHit() {
+func (cm *cacheMetrics) balanceHit() {
 	cm.balanceMetrics.Lock()
-	cm.balanceMetrics.Hits++
+	cm.balanceMetrics.hits++
 	cm.balanceMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) BalanceMiss() {
+func (cm *cacheMetrics) balanceMiss() {
 	cm.balanceMetrics.Lock()
-	cm.balanceMetrics.Misses++
+	cm.balanceMetrics.misses++
 	cm.balanceMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) HistoryHit() {
+func (cm *cacheMetrics) historyHit() {
 	cm.historyMetrics.Lock()
-	cm.historyMetrics.Hits++
+	cm.historyMetrics.hits++
 	cm.historyMetrics.Unlock()
 }
 
-func (cm *CacheMetrics) HistoryMiss() {
+func (cm *cacheMetrics) historyMiss() {
 	cm.historyMetrics.Lock()
-	cm.historyMetrics.Misses++
+	cm.historyMetrics.misses++
 	cm.historyMetrics.Unlock()
 }
 
@@ -684,7 +674,7 @@ type AddressCache struct {
 	a              map[string]*AddressCacheItem
 	cap            int
 	capAddr        int
-	cacheMetrics   CacheMetrics
+	cacheMetrics   cacheMetrics
 	ProjectAddress string
 }
 
@@ -705,22 +695,22 @@ func NewAddressCache(rowCapacity int) *AddressCache {
 
 // BalanceStats reports the balance hit/miss stats.
 func (ac *AddressCache) BalanceStats() (hits, misses int) {
-	return ac.cacheMetrics.BalanceStats()
+	return ac.cacheMetrics.balanceStats()
 }
 
-// RowStats reports the row hit/miss stats.
+// rowStats reports the row hit/miss stats.
 func (ac *AddressCache) RowStats() (hits, misses int) {
-	return ac.cacheMetrics.RowStats()
+	return ac.cacheMetrics.rowStats()
 }
 
 // UtxoStats reports the utxo hit/miss stats.
 func (ac *AddressCache) UtxoStats() (hits, misses int) {
-	return ac.cacheMetrics.UtxoStats()
+	return ac.cacheMetrics.utxoStats()
 }
 
 // HistoryStats reports the history data hit/miss stats.
 func (ac *AddressCache) HistoryStats() (hits, misses int) {
-	return ac.cacheMetrics.HistoryStats()
+	return ac.cacheMetrics.historyStats()
 }
 
 // Reporter prints the number of cached addresses, rows, and utxos, as well as a
@@ -797,23 +787,23 @@ func (ac *AddressCache) Clear(addrs []string) (numCleared int) {
 func (ac *AddressCache) Balance(addr string) (*dbtypes.AddressBalance, *BlockID) {
 	aci := ac.addressCacheItem(addr)
 	if aci == nil {
-		ac.cacheMetrics.BalanceMiss()
+		ac.cacheMetrics.balanceMiss()
 		return nil, nil
 	}
-	ac.cacheMetrics.BalanceHit()
+	ac.cacheMetrics.balanceHit()
 	return aci.Balance()
 }
 
-// UTXOs attempts to retrieve an []AddressTxnOutput for the given address. The
+// UTXOs attempts to retrieve an []*AddressTxnOutput for the given address. The
 // BlockID for the block at which the cached data is valid is also returned. In
 // the event of a cache miss, the slice and the *BlockID will be nil.
-func (ac *AddressCache) UTXOs(addr string) ([]apitypes.AddressTxnOutput, *BlockID) {
+func (ac *AddressCache) UTXOs(addr string) ([]*dbtypes.AddressTxnOutput, *BlockID) {
 	aci := ac.addressCacheItem(addr)
 	if aci == nil {
-		ac.cacheMetrics.UtxoMiss()
+		ac.cacheMetrics.utxoMiss()
 		return nil, nil
 	}
-	ac.cacheMetrics.UtxoHit()
+	ac.cacheMetrics.utxoHit()
 	return aci.UTXOs()
 }
 
@@ -825,30 +815,30 @@ func (ac *AddressCache) HistoryChart(addr string, addrChart dbtypes.HistoryChart
 	chartGrouping dbtypes.TimeBasedGrouping) (*dbtypes.ChartsData, *BlockID) {
 	aci := ac.addressCacheItem(addr)
 	if aci == nil {
-		ac.cacheMetrics.HistoryMiss()
+		ac.cacheMetrics.historyMiss()
 		return nil, nil
 	}
 
 	cd, blockID := aci.HistoryChart(addrChart, chartGrouping)
 	if cd == nil || blockID == nil {
-		ac.cacheMetrics.HistoryMiss()
+		ac.cacheMetrics.historyMiss()
 		return nil, nil
 	}
 
-	ac.cacheMetrics.HistoryHit()
+	ac.cacheMetrics.historyHit()
 	return cd, blockID
 }
 
 // Rows attempts to retrieve an []*AddressRow for the given address. The BlockID
 // for the block at which the cached data is valid is also returned. In the
 // event of a cache miss, the slice and the *BlockID will be nil.
-func (ac *AddressCache) Rows(addr string) ([]dbtypes.AddressRowCompact, *BlockID) {
+func (ac *AddressCache) Rows(addr string) ([]*dbtypes.AddressRowCompact, *BlockID) {
 	aci := ac.addressCacheItem(addr)
 	if aci == nil {
-		ac.cacheMetrics.RowMiss()
+		ac.cacheMetrics.rowMiss()
 		return nil, nil
 	}
-	ac.cacheMetrics.RowHit()
+	ac.cacheMetrics.rowHit()
 	return aci.Rows()
 }
 
@@ -887,13 +877,13 @@ func (ac *AddressCache) Transactions(addr string, N, offset int64, txnType dbtyp
 // AddrTxnViewType, and it returns a []dbtypes.AddressRowMerged. A cache miss is
 // indicated by (*BlockID)==nil. The retured rows may be nil or an empty slice
 // for a cache hit if the address has no history.
-func (ac *AddressCache) TransactionsMerged(addr string, N, offset int64, txnType dbtypes.AddrTxnViewType) ([]dbtypes.AddressRowMerged, *BlockID, error) {
+func (ac *AddressCache) TransactionsMerged(addr string, N, offset int64, txnType dbtypes.AddrTxnViewType) ([]*dbtypes.AddressRowMerged, *BlockID, error) {
 	aci := ac.addressCacheItem(addr)
 	if aci == nil {
-		ac.cacheMetrics.RowMiss()
+		ac.cacheMetrics.rowMiss()
 		return nil, nil, nil // cache miss is not an error; *BlockID must be nil
 	}
-	ac.cacheMetrics.RowHit()
+	ac.cacheMetrics.rowHit()
 
 	rows, blockID, err := aci.Transactions(int(N), int(offset), txnType)
 	if err != nil {
@@ -901,7 +891,7 @@ func (ac *AddressCache) TransactionsMerged(addr string, N, offset int64, txnType
 	}
 
 	switch r := rows.(type) {
-	case []dbtypes.AddressRowMerged:
+	case []*dbtypes.AddressRowMerged:
 		return r, blockID, err
 	default:
 		return nil, nil, fmt.Errorf(`TransactionsMerged(%s, N=%d, offset=%d, view="%s") failed to return []dbtypes.AddressRowMerged.`,
@@ -913,13 +903,13 @@ func (ac *AddressCache) TransactionsMerged(addr string, N, offset int64, txnType
 // non-merged AddrTxnViewType, and it returns a []dbtypes.AddressRowCompact. A
 // cache miss is indicated by (*BlockID)==nil. The retured rows may be nil or an
 // empty slice for a cache hit if the address has no history.
-func (ac *AddressCache) TransactionsCompact(addr string, N, offset int64, txnType dbtypes.AddrTxnViewType) ([]dbtypes.AddressRowCompact, *BlockID, error) {
+func (ac *AddressCache) TransactionsCompact(addr string, N, offset int64, txnType dbtypes.AddrTxnViewType) ([]*dbtypes.AddressRowCompact, *BlockID, error) {
 	aci := ac.addressCacheItem(addr)
 	if aci == nil {
-		ac.cacheMetrics.RowMiss()
+		ac.cacheMetrics.rowMiss()
 		return nil, nil, nil // cache miss is not an error; *BlockID must be nil
 	}
-	ac.cacheMetrics.RowHit()
+	ac.cacheMetrics.rowHit()
 
 	rows, blockID, err := aci.Transactions(int(N), int(offset), txnType)
 	if err != nil {
@@ -927,7 +917,7 @@ func (ac *AddressCache) TransactionsCompact(addr string, N, offset int64, txnTyp
 	}
 
 	switch r := rows.(type) {
-	case []dbtypes.AddressRowCompact:
+	case []*dbtypes.AddressRowCompact:
 		return r, blockID, err
 	default:
 		return nil, nil, fmt.Errorf(`TransactionsCompact(%s, N=%d, offset=%d, view="%s") failed to return []dbtypes.AddressRowCompact.`,
@@ -1030,7 +1020,7 @@ func (ac *AddressCache) addCacheItem(addr string, aci *AddressCacheItem) (succes
 	return
 }
 
-func (ac *AddressCache) setCacheItemRows(addr string, rows []dbtypes.AddressRowCompact, block *BlockID) (updated bool) {
+func (ac *AddressCache) setCacheItemRows(addr string, rows []*dbtypes.AddressRowCompact, block *BlockID) (updated bool) {
 	if ac.cap < 1 || ac.capAddr < 1 {
 		return false
 	}
@@ -1073,7 +1063,7 @@ func (ac *AddressCache) StoreRows(addr string, rows []*dbtypes.AddressRow, block
 		return false
 	}
 
-	rowsCompact := []dbtypes.AddressRowCompact{}
+	rowsCompact := []*dbtypes.AddressRowCompact{}
 	if rows != nil {
 		rowsCompact = dbtypes.CompactRows(rows)
 	}
@@ -1132,7 +1122,7 @@ func (ac *AddressCache) StoreHistoryChart(addr string, addrChart dbtypes.History
 // StoreRowsCompact stores the non-merged AddressRow slice for the given address
 // in cache. The current best block data is required to determine cache
 // freshness.
-func (ac *AddressCache) StoreRowsCompact(addr string, rows []dbtypes.AddressRowCompact, block *BlockID) bool {
+func (ac *AddressCache) StoreRowsCompact(addr string, rows []*dbtypes.AddressRowCompact, block *BlockID) bool {
 	if block == nil || ac.cap < 1 || ac.capAddr < 1 {
 		return false
 	}
@@ -1141,7 +1131,7 @@ func (ac *AddressCache) StoreRowsCompact(addr string, rows []dbtypes.AddressRowC
 	defer ac.mtx.Unlock()
 
 	if rows == nil {
-		rows = []dbtypes.AddressRowCompact{}
+		rows = []*dbtypes.AddressRowCompact{}
 	}
 
 	// respect cache capacity
@@ -1180,9 +1170,9 @@ func (ac *AddressCache) StoreBalance(addr string, balance *dbtypes.AddressBalanc
 	return true
 }
 
-// StoreUTXOs stores the AddressTxnOutput slice for the given address in cache.
+// StoreUTXOs stores the *AddressTxnOutput slice for the given address in cache.
 // The current best block data is required to determine cache freshness.
-func (ac *AddressCache) StoreUTXOs(addr string, utxos []apitypes.AddressTxnOutput, block *BlockID) bool {
+func (ac *AddressCache) StoreUTXOs(addr string, utxos []*dbtypes.AddressTxnOutput, block *BlockID) bool {
 	if ac.cap < 1 || ac.capAddr < 1 {
 		return false
 	}
@@ -1197,7 +1187,7 @@ func (ac *AddressCache) StoreUTXOs(addr string, utxos []apitypes.AddressTxnOutpu
 	aci := ac.a[addr]
 
 	if block != nil && utxos == nil {
-		utxos = []apitypes.AddressTxnOutput{}
+		utxos = []*dbtypes.AddressTxnOutput{}
 	}
 
 	if aci == nil || aci.BlockHash() != block.Hash {
@@ -1213,4 +1203,34 @@ func (ac *AddressCache) StoreUTXOs(addr string, utxos []apitypes.AddressTxnOutpu
 	aci.utxos = utxos
 	aci.mtx.Unlock()
 	return true
+}
+
+// ClearUTXOs clears any stored UTXOs for the given address in cache.
+func (ac *AddressCache) ClearUTXOs(addr string) {
+	ac.mtx.Lock()
+	defer ac.mtx.Unlock()
+	aci := ac.a[addr]
+	if aci == nil {
+		return
+	}
+
+	// AddressCacheItem found. Clear utxos.
+	aci.mtx.Lock()
+	aci.utxos = nil
+	aci.mtx.Unlock()
+}
+
+// ClearRows clears any stored address rows for the given address in cache.
+func (ac *AddressCache) ClearRows(addr string) {
+	ac.mtx.Lock()
+	defer ac.mtx.Unlock()
+	aci := ac.a[addr]
+	if aci == nil {
+		return
+	}
+
+	// AddressCacheItem found. Clear rows.
+	aci.mtx.Lock()
+	aci.rows = nil
+	aci.mtx.Unlock()
 }

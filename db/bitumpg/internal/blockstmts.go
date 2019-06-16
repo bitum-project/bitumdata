@@ -1,3 +1,7 @@
+// Copyright (c) 2018-2019, The Bitum developers
+// Copyright (c) 2017, Jonathan Chappelow
+// See LICENSE for details.
+
 package internal
 
 import (
@@ -6,6 +10,7 @@ import (
 	"github.com/bitum-project/bitumdata/db/dbtypes"
 )
 
+// These queries relate primarily to the "blocks" and "block_chain" tables.
 const (
 	CreateBlockTable = `CREATE TABLE IF NOT EXISTS blocks (
 		id SERIAL PRIMARY KEY,
@@ -83,12 +88,12 @@ const (
 
 	// IndexBlockTableOnHash creates the unique index uix_block_hash on (hash).
 	IndexBlockTableOnHash   = `CREATE UNIQUE INDEX ` + IndexOfBlocksTableOnHash + ` ON blocks(hash);`
-	DeindexBlockTableOnHash = `DROP INDEX ` + IndexOfBlocksTableOnHash + `;`
+	DeindexBlockTableOnHash = `DROP INDEX ` + IndexOfBlocksTableOnHash + ` CASCADE;`
 
 	// IndexBlocksTableOnHeight creates the index uix_block_height on (height).
 	// This is not unique because of side chains.
 	IndexBlocksTableOnHeight   = `CREATE INDEX ` + IndexOfBlocksTableOnHeight + ` ON blocks(height);`
-	DeindexBlocksTableOnHeight = `DROP INDEX ` + IndexOfBlocksTableOnHeight + `;`
+	DeindexBlocksTableOnHeight = `DROP INDEX ` + IndexOfBlocksTableOnHeight + ` CASCADE;`
 
 	SelectBlockByTimeRangeSQL = `SELECT hash, height, size, time, numtx
 		FROM blocks WHERE time BETWEEN $1 and $2 ORDER BY time DESC LIMIT $3;`
@@ -107,10 +112,9 @@ const (
 
 	// SelectBlocksTicketsPrice selects the ticket price and difficulty for the
 	// first block in a stake difficulty window.
-	SelectBlocksTicketsPrice = `SELECT sbits, time, difficulty
+	SelectBlocksTicketsPrice = `SELECT sbits, time, difficulty, height, fresh_stake
 		FROM blocks
-		WHERE height % $1 = 0
-		AND height > $2
+		WHERE height > $1
 		ORDER BY height;`
 
 	SelectGenesisTime = `SELECT time
@@ -219,8 +223,6 @@ const (
 		WHERE is_mainchain
 		AND height > $1
 		ORDER BY height;`
-
-	// TODO: index block_chain where needed
 )
 
 func MakeBlockInsertStatement(block *dbtypes.Block, checked bool) string {

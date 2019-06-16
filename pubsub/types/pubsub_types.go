@@ -1,6 +1,8 @@
 package types
 
 import (
+	"encoding/json"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -8,6 +10,23 @@ import (
 	"github.com/bitum-project/bitumd/bitumutil"
 	exptypes "github.com/bitum-project/bitumdata/explorer/types"
 )
+
+// Ver is a json tagged version type.
+type Ver struct {
+	Major uint32 `json:"major"`
+	Minor uint32 `json:"minor"`
+	Patch uint32 `json:"patch"`
+}
+
+// NewVer creates a Ver from the major/minor/patch version components.
+func NewVer(major, minor, patch uint32) Ver {
+	return Ver{major, minor, patch}
+}
+
+// String implements Stringer for Ver.
+func (v Ver) String() string {
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
 
 var (
 	// ErrWsClosed is the error message when a websocket.(*Conn).Close tries to
@@ -38,13 +57,25 @@ func IsTemporaryErr(err error) bool {
 // WebSocketMessage represents the JSON object used to send and receive typed
 // messages to the web client.
 type WebSocketMessage struct {
-	EventId string `json:"event"`
-	Message string `json:"message"`
+	EventId string          `json:"event"`
+	Message json.RawMessage `json:"message"`
 }
 
 type AddressMessage struct {
 	Address string `json:"address"`
 	TxHash  string `json:"transaction"`
+}
+
+type RequestMessage struct {
+	RequestId int64  `json:"request_id"`
+	Message   string `json:"message"`
+}
+
+type ResponseMessage struct {
+	Success        bool   `json:"success"`
+	RequestEventId string `json:"request_event"`
+	RequestId      int64  `json:"request_id"`
+	Data           string `json:"data"`
 }
 
 func (am AddressMessage) String() string {
@@ -55,9 +86,15 @@ type TxList []*exptypes.MempoolTx
 
 type HubSignal int
 
+// These are the different signal types used for passing messages between the
+// client and server, and internally between the pubsub and websocket hubs.
 const (
 	SigSubscribe HubSignal = iota
 	SigUnsubscribe
+	SigDecodeTx
+	SigGetMempoolTxs
+	SigSendTx
+	SigVersion
 	SigNewBlock
 	SigMempoolUpdate
 	SigPingAndUserCount
@@ -81,6 +118,10 @@ var Subscriptions = map[string]HubSignal{
 var eventIDs = map[HubSignal]string{
 	SigSubscribe:        "subscribe",
 	SigUnsubscribe:      "unsubscribe",
+	SigDecodeTx:         "decodetx",
+	SigGetMempoolTxs:    "getmempooltxs",
+	SigSendTx:           "sendtx",
+	SigVersion:          "getversion",
 	SigNewBlock:         "newblock",
 	SigMempoolUpdate:    "mempool",
 	SigPingAndUserCount: "ping",

@@ -7,6 +7,7 @@ package types
 import (
 	"encoding/json"
 
+	"github.com/bitum-project/bitumd/bitumutil"
 	"github.com/bitum-project/bitumdata/db/dbtypes"
 )
 
@@ -39,8 +40,8 @@ type InsightAddressInfo struct {
 	TotalSentSat             int64    `json:"totalSentSat"`
 	UnconfirmedBalance       float64  `json:"unconfirmedBalance"`
 	UnconfirmedBalanceSat    int64    `json:"unconfirmedBalanceSat"`
-	UnconfirmedTxAppearances int64    `json:"unconfirmedTxApperances"`
-	TxAppearances            int64    `json:"txApperances"`
+	UnconfirmedTxAppearances int64    `json:"unconfirmedTxApperances"` // [sic]
+	TxAppearances            int64    `json:"txApperances"`            // [sic]
 	TransactionsID           []string `json:"transactions,omitempty"`
 }
 
@@ -49,7 +50,7 @@ type InsightRawTx struct {
 	Rawtx string `json:"rawtx"`
 }
 
-// InsightMultiAddrsTx models multi-address post data structure.
+// InsightMultiAddrsTx models the POST request for the multi-address endpoints.
 type InsightMultiAddrsTx struct {
 	Addresses   string      `json:"addrs"`
 	From        json.Number `json:"from,Number,omitempty"`
@@ -59,6 +60,8 @@ type InsightMultiAddrsTx struct {
 	NoSpent     json.Number `json:"noSpent"`
 }
 
+// InsightMultiAddrsTxOutput models the response to the multi-address
+// transactions POST request.
 type InsightMultiAddrsTxOutput struct {
 	TotalItems int64       `json:"totalItems"`
 	From       int         `json:"from"`
@@ -91,6 +94,23 @@ type AddressTxnOutput struct {
 	Atoms         int64   `json:"atoms,omitempty"` // Not Required per Insight spec
 	Satoshis      int64   `json:"satoshis,omitempty"`
 	Confirmations int64   `json:"confirmations"`
+}
+
+// TxOutFromDB converts a dbtypes.AddressTxnOutput to a api/types.AddressTxnOutput.
+func TxOutFromDB(dbTxOut *dbtypes.AddressTxnOutput, currentHeight int32) *AddressTxnOutput {
+	return &AddressTxnOutput{
+		Address:      dbTxOut.Address,
+		TxnID:        dbTxOut.TxHash.String(),
+		Vout:         dbTxOut.Vout,
+		BlockTime:    dbTxOut.BlockTime,
+		ScriptPubKey: dbTxOut.PkScript,
+		Height:       int64(dbTxOut.Height),
+		//BlockHash:    dbTxOut.BlockHash.String(),
+		Amount: bitumutil.Amount(dbTxOut.Atoms).ToCoin(),
+		//Atoms: dbTxOut.Atoms,
+		Satoshis:      dbTxOut.Atoms,
+		Confirmations: int64(currentHeight - dbTxOut.Height + 1),
+	}
 }
 
 // SpendByFundingHash models a return from SpendDetailsForFundingTx.

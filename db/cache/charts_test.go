@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 func TestChartsCache(t *testing.T) {
 	gobPath := filepath.Join(tempDir, "log.gob")
 	ctx, shutdown := context.WithCancel(context.Background())
-	charts := NewChartData(0, time.Unix(0, 0), &chaincfg.MainNetParams, ctx)
+	charts := NewChartData(ctx, 0, &chaincfg.MainNetParams)
 
 	comp := func(k string, a interface{}, b interface{}, expectation bool) {
 		v := reflect.DeepEqual(a, b)
@@ -79,6 +79,8 @@ func TestChartsCache(t *testing.T) {
 	charts.Windows.Time = ChartUints{0}
 	charts.Windows.PowDiff = ChartFloats{0}
 	charts.Windows.TicketPrice = ChartUints{0}
+	charts.Windows.StakeCount = ChartUints{0}
+	charts.Windows.MissedVotes = ChartUints{0}
 
 	t.Run("Read_a_non-existent_gob_dump", func(t *testing.T) {
 		err := charts.readCacheFile(filepath.Join(tempDir, "log1.gob"))
@@ -179,19 +181,19 @@ func TestChartsCache(t *testing.T) {
 	})
 
 	t.Run("get_chart", func(t *testing.T) {
-		chart, err := charts.Chart(BlockSize, string(BlockZoom))
+		chart, err := charts.Chart(BlockSize, string(BlockBin), string(TimeAxis))
 		if err != nil {
 			t.Fatalf("error getting fresh chart: %v", err)
 		}
 		if string(chart) != `{"x":[1,86402,86403,172804,172805,259206],"y":[1,2,3,4,5,6]}` {
 			t.Fatalf("unexpected chart json")
 		}
-		ck := cacheKey(BlockSize, BlockZoom)
+		ck := cacheKey(BlockSize, BlockBin, TimeAxis)
 		if !reflect.DeepEqual(charts.cache[ck].data, chart) {
 			t.Fatalf("could not match chart to cache")
 		}
 		// Grab chart once more. This should test the cache path.
-		chart2, err := charts.Chart(BlockSize, string(BlockZoom))
+		chart2, err := charts.Chart(BlockSize, string(BlockBin), string(TimeAxis))
 		if err != nil {
 			t.Fatalf("error getting chart from cache: %v", err)
 		}
@@ -201,10 +203,6 @@ func TestChartsCache(t *testing.T) {
 	})
 
 	t.Run("Reorg", func(t *testing.T) {
-		c := make(chan *txhelpers.ReorgData, 2)
-		dummyWg := new(sync.WaitGroup)
-		dummyWg.Add(1)
-		go charts.ReorgHandler(dummyWg, c)
 		// This should cause the blocks to truncate to length 2, the days to
 		// drop to length 1, and the windows to drop to length 0.
 		h, err := chainhash.NewHash([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
@@ -213,11 +211,13 @@ func TestChartsCache(t *testing.T) {
 		}
 		wg := new(sync.WaitGroup)
 		wg.Add(1)
-		c <- &txhelpers.ReorgData{
-			NewChain:       []chainhash.Hash{*h},
-			NewChainHeight: 2,
-			WG:             wg,
-		}
+		go func() {
+			charts.ReorgHandler(&txhelpers.ReorgData{
+				NewChain:       []chainhash.Hash{*h},
+				NewChainHeight: 2,
+			})
+			wg.Done()
+		}()
 		var timedOut bool
 		go func() {
 			select {
@@ -258,6 +258,8 @@ func TestChartReorg(t *testing.T) {
 			Time:        newUints(),
 			PowDiff:     newFloats(),
 			TicketPrice: newUints(),
+			StakeCount:  newUints(),
+			MissedVotes: newUints(),
 		}
 		charts.Days = &zoomSet{
 			cacheID:   0,
@@ -289,21 +291,13 @@ func TestChartReorg(t *testing.T) {
 		d := &txhelpers.ReorgData{
 			NewChainHeight: int32(newHeight),
 			NewChain:       make([]chainhash.Hash, chainLen),
-			WG:             new(sync.WaitGroup),
 		}
-		d.WG.Add(1)
 		return d
 	}
-	wg := new(sync.WaitGroup)
-	c := make(chan *txhelpers.ReorgData)
-	wg.Add(1)
-	go charts.ReorgHandler(wg, c)
 	testReorg := func(newHeight, chainLen, newBlockLen, newDayLen, newWindowLen int) {
-		d := reorgData(newHeight, chainLen)
-		c <- d
 		done := make(chan struct{})
 		go func() {
-			d.WG.Wait()
+			charts.ReorgHandler(reorgData(newHeight, chainLen))
 			close(done)
 		}()
 		select {

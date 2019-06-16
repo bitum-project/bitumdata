@@ -33,12 +33,11 @@ import (
 	"github.com/bitum-project/bitumdata/gov/politeia"
 	"github.com/bitum-project/bitumdata/mempool"
 	m "github.com/bitum-project/bitumdata/middleware"
-	"github.com/bitum-project/bitumdata/pubsub"
 	pstypes "github.com/bitum-project/bitumdata/pubsub/types"
+	"github.com/bitum-project/bitumdata/pubsub"
 	"github.com/bitum-project/bitumdata/rpcutils"
 	"github.com/bitum-project/bitumdata/semver"
 	"github.com/bitum-project/bitumdata/stakedb"
-	"github.com/bitum-project/bitumdata/txhelpers"
 	"github.com/bitum-project/bitumdata/api"
 	"github.com/bitum-project/bitumdata/api/insight"
 	"github.com/bitum-project/bitumdata/explorer"
@@ -102,12 +101,15 @@ func _main(ctx context.Context) error {
 	log.Infof("%s version %v (Go version %s)", version.AppName,
 		version.Version(), runtime.Version())
 
-	// Setup the notification handlers.
-	notify.MakeNtfnChans()
+	// Grab a Notifier. After all databases are synced, register handlers with
+	// the Register*Group methods, set the best block height with SetPreviousBlock
+	// and start receiving notifications with Listen. Create the notifer now so
+	// the *rpcclient.NotificationHandlers can be obtained, using
+	// (*Notifier).BitumdHandlers, for the rpcclient.Client constructor.
+	notifier := notify.NewNotifier(ctx)
 
 	// Connect to bitumd RPC server using a websocket.
-	ntfnHandlers, collectionQueue := notify.MakeNodeNtfnHandlers()
-	bitumdClient, nodeVer, err := connectNodeRPC(cfg, ntfnHandlers)
+	bitumdClient, nodeVer, err := connectNodeRPC(cfg, notifier.BitumdHandlers())
 	if err != nil || bitumdClient == nil {
 		return fmt.Errorf("Connection to bitumd failed: %v", err)
 	}
@@ -118,11 +120,6 @@ func _main(ctx context.Context) error {
 			bitumdClient.Shutdown()
 			bitumdClient.WaitForShutdown()
 		}
-
-		// The individial hander's loops should close the notifications channels
-		// on quit, but do it here too to be sure.
-		notify.CloseNtfnChans()
-
 		log.Infof("Bye!")
 		time.Sleep(250 * time.Millisecond)
 	}()
@@ -162,8 +159,8 @@ func _main(ctx context.Context) error {
 	// SQLite
 	dbPath := filepath.Join(cfg.DataDir, cfg.DBFileName)
 	dbInfo := bitumsqlite.DBInfo{FileName: dbPath}
-	baseDB, err := bitumsqlite.InitWiredDB(&dbInfo, stakeDB,
-		notify.NtfnChans.UpdateStatusDBHeight, bitumdClient, activeChain, requestShutdown)
+	baseDB, err := bitumsqlite.InitWiredDB(&dbInfo, stakeDB, bitumdClient,
+		activeChain, requestShutdown)
 	if err != nil {
 		return fmt.Errorf("Unable to initialize SQLite database: %v", err)
 	}
@@ -176,17 +173,24 @@ func _main(ctx context.Context) error {
 		return fmt.Errorf("Possible SQLite corruption: %v", err)
 	}
 
-	log.Infof("Setting up the Politeia's proposals clone repository. Please wait...")
-	// If repoName and repoOwner are set to empty strings the defaults are used.
-	parser, err := proposals.NewParser(cfg.PiPropRepoOwner, cfg.PiPropRepoName, cfg.DataDir)
-	if err != nil {
-		// since this piparser isn't a requirement to run the explorer, its
-		// failure should not block the system from running.
-		log.Error(err)
+	var piParser bitumpg.ProposalsFetcher
+	if !cfg.DisablePiParser {
+		log.Infof("Setting up the Politeia's proposals clone repository. Please wait...")
+		// If repoName and repoOwner are set to empty strings the defaults are used.
+		parser, err := proposals.NewParser(cfg.PiPropRepoOwner, cfg.PiPropRepoName, cfg.DataDir)
+		if err != nil {
+			// since this piparser isn't a requirement to run the explorer, its
+			// failure should not block the system from running.
+			log.Error(err)
+		}
+
+		if parser != nil {
+			piParser = parser
+		}
 	}
 
 	// Auxiliary DB (PostgreSQL)
-	var newPGIndexes, updateAllAddresses, updateAllVotes bool
+	var newPGIndexes, updateAllAddresses bool
 	pgHost, pgPort := cfg.PGHost, ""
 	if !strings.HasPrefix(pgHost, "/") {
 		pgHost, pgPort, err = net.SplitHostPort(cfg.PGHost)
@@ -215,7 +219,7 @@ func _main(ctx context.Context) error {
 	mpChecker := rpcutils.NewMempoolAddressChecker(bitumdClient, activeChain)
 	chainDB, err := bitumpg.NewChainDBWithCancel(ctx, &dbi, activeChain,
 		stakeDB, !cfg.NoDevPrefetch, cfg.HidePGConfig, rowCap,
-		mpChecker, parser, bitumdClient)
+		mpChecker, piParser, bitumdClient)
 	if chainDB != nil {
 		defer chainDB.Close()
 	}
@@ -281,12 +285,10 @@ func _main(ctx context.Context) error {
 
 		pgDBHeight, err = pgDB.HeightDB()
 		if err != nil {
-			if err != sql.ErrNoRows {
-				log.Errorf("pgDB.HeightDB failed: %v", err)
-				return
-			}
-			// err == sql.ErrNoRows is not an error, and pgDBHeight == -1
-			err = nil
+			log.Errorf("pgDB.HeightDB failed: %v", err)
+			return
+		}
+		if pgDBHeight == -1 {
 			log.Infof("pgDB block summary table is empty.")
 		}
 		log.Debugf("pgDB height: %d", pgDBHeight)
@@ -393,7 +395,7 @@ func _main(ctx context.Context) error {
 
 	// Get the last block added to the aux DB.
 	lastBlockPG, err := pgDB.HeightDB()
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil {
 		return fmt.Errorf("Unable to get height from PostgreSQL DB: %v", err)
 	}
 
@@ -408,8 +410,7 @@ func _main(ctx context.Context) error {
 		heightDB = 0
 	}
 
-	charts := cache.NewChartData(uint32(heightDB), time.Unix(pgDB.GenesisStamp(), 0),
-		activeChain, ctx)
+	charts := cache.NewChartData(ctx, uint32(heightDB), activeChain)
 	pgDB.RegisterCharts(charts)
 	baseDB.RegisterCharts(charts)
 
@@ -560,20 +561,27 @@ func _main(ctx context.Context) error {
 	// store and retrieve proposals data. Proposals votes is Off-Chain
 	// data stored in github repositories away from the bitum blockchain. It also
 	// creates a new http client needed to query Politeia API endpoints.
-	proposalsInstance, err := politeia.NewProposalsDB(cfg.PoliteiaAPIURL,
-		filepath.Join(cfg.DataDir, cfg.ProposalsFileName))
-	if err != nil {
-		return fmt.Errorf("failed to create new proposals db instance: %v", err)
-	}
+	// When piparser is disabled, disable the API calls too.
+	var proposalsInstance explorer.PoliteiaBackend
 
-	// Retrieve newly added proposals and add them to the proposals db.
-	// Proposal db update is made asynchronously to ensure that the system works
-	// even when the Politeia API endpoint set is down.
-	go func() {
-		if err := proposalsInstance.CheckProposalsUpdates(); err != nil {
-			log.Errorf("updating proposals db failed: %v", err)
+	if !cfg.DisablePiParser {
+		proposalsInstance, err = politeia.NewProposalsDB(cfg.PoliteiaAPIURL,
+			filepath.Join(cfg.DataDir, cfg.ProposalsFileName))
+		if err != nil {
+			return fmt.Errorf("failed to create new proposals db instance: %v", err)
 		}
-	}()
+
+		// Retrieve newly added proposals and add them to the proposals db.
+		// Proposal db update is made asynchronously to ensure that the system works
+		// even when the Politeia API endpoint set is down.
+		go func() {
+			if err := proposalsInstance.CheckProposalsUpdates(); err != nil {
+				log.Errorf("updating proposals db failed: %v", err)
+			}
+		}()
+	} else {
+		log.Info("Piparser is disabled. Proposals API has been disabled too")
+	}
 
 	// A vote tracker tracks current block and stake versions and votes.
 	tracker, err := agendas.NewVoteTracker(activeChain, bitumdClient,
@@ -635,7 +643,8 @@ func _main(ctx context.Context) error {
 	signalToExplorer := explore.MempoolSignal()
 	mempoolSigOuts := []chan<- pstypes.HubMessage{signalToPSHub, signalToExplorer}
 	mpm, err := mempool.NewMempoolMonitor(ctx, mpoolCollector, mempoolSavers,
-		activeChain, &wg, notify.NtfnChans.NewTxChan, mempoolSigOuts, true)
+		activeChain, bitumdClient, mempoolSigOuts, true)
+
 	// Ensure the initial collect/store succeeded.
 	if err != nil {
 		// Shutdown goroutines.
@@ -728,7 +737,7 @@ func _main(ctx context.Context) error {
 	// full/pg mode. Since insightSocketServer is added into the url before even
 	// the sync starts, this implementation cannot be moved to
 	// initiateHandlersAndCollectBlocks function.
-	insightSocketServer, err := insight.NewSocketServer(notify.NtfnChans.InsightNewTxChan, activeChain)
+	insightSocketServer, err := insight.NewSocketServer(activeChain, bitumdClient)
 	if err != nil {
 		return fmt.Errorf("Could not create Insight socket.io server: %v", err)
 	}
@@ -736,23 +745,24 @@ func _main(ctx context.Context) error {
 
 	// Start bitumdata's JSON web API.
 	app := api.NewContext(&api.AppContextConfig{
-		Client:            bitumdClient,
-		Params:            activeChain,
-		DataSource:        baseDB,
-		DBSource:          pgDB,
-		JsonIndent:        cfg.IndentJSON,
-		XcBot:             xcBot,
-		AgendasDBInstance: agendasInstance,
-		MaxAddrs:          cfg.MaxCSVAddrs,
-		Charts:            charts,
+		Client:             bitumdClient,
+		Params:             activeChain,
+		DataSource:         baseDB,
+		DBSource:           pgDB,
+		JsonIndent:         cfg.IndentJSON,
+		XcBot:              xcBot,
+		AgendasDBInstance:  agendasInstance,
+		MaxAddrs:           cfg.MaxCSVAddrs,
+		Charts:             charts,
+		IsPiparserDisabled: cfg.DisablePiParser,
 	})
 	// Start the notification hander for keeping /status up-to-date.
 	wg.Add(1)
-	go app.StatusNtfnHandler(ctx, &wg)
+	go app.StatusNtfnHandler(ctx, &wg, baseDB.UpdateChan())
 	// Initial setting of DBHeight. Subsequently, Store() will send this.
 	if dbHeight >= 0 {
 		// Do not sent 4294967295 = uint32(-1) if there are no blocks.
-		notify.NtfnChans.UpdateStatusDBHeight <- uint32(dbHeight)
+		baseDB.SignalHeight(uint32(dbHeight))
 	}
 
 	// Configure the URL path to http handler router for the API.
@@ -777,7 +787,6 @@ func _main(ctx context.Context) error {
 		}
 
 		webMux.Get(pathPrefix+"favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-			log.Infof("Serving %s", r.URL.String())
 			http.ServeFile(w, r, "./public/images/favicon/favicon.ico")
 		})
 
@@ -885,8 +894,7 @@ func _main(ctx context.Context) error {
 
 	// Coordinate the sync of both sqlite and auxiliary DBs with the network.
 	// This closure captures the RPC client and the quit channel.
-	getSyncd := func(updateAddys, updateVotes, newPGInds bool,
-		fetchHeightInBaseDB int64) (int64, int64, error) {
+	getSyncd := func(updateAddys, newPGInds bool, fetchHeightInBaseDB int64) (int64, int64, error) {
 		// Simultaneously synchronize the ChainDB (PostgreSQL) and the
 		// block/stake info DB (sqlite). Results are returned over channels:
 		sqliteSyncRes := make(chan dbtypes.SyncResult)
@@ -894,7 +902,9 @@ func _main(ctx context.Context) error {
 
 		// Use either the plain rpcclient.Client or a rpcutils.BlockPrefetchClient.
 		var bf rpcutils.BlockFetcher
-		if cfg.BlockPrefetch {
+		if cfg.NoBlockPrefetch {
+			bf = bitumdClient
+		} else {
 			pfc := rpcutils.NewBlockPrefetchClient(bitumdClient)
 			defer func() {
 				pfc.Stop()
@@ -902,8 +912,6 @@ func _main(ctx context.Context) error {
 					pfc.Hits(), pfc.Misses())
 			}()
 			bf = pfc
-		} else {
-			bf = bitumdClient
 		}
 
 		// Synchronization between DBs via rpcutils.BlockGate
@@ -920,15 +928,15 @@ func _main(ctx context.Context) error {
 		// StakeDatabase at the best block's height. For a detailed description
 		// on how the DBs' synchronization is coordinated, see the documents in
 		// db/bitumpg/sync.go.
-		go pgDB.SyncChainDBAsync(ctx, pgSyncRes, smartClient,
-			updateAddys, updateVotes, newPGInds, latestBlockHash, barLoad)
+		go pgDB.SyncChainDBAsync(ctx, pgSyncRes, smartClient, updateAddys,
+			newPGInds, latestBlockHash, barLoad)
 
 		// Wait for the results from both of these DBs.
 		return waitForSync(ctx, sqliteSyncRes, pgSyncRes)
 	}
 
-	baseDBHeight, pgDBHeight, err := getSyncd(updateAllAddresses,
-		updateAllVotes, newPGIndexes, fetchToHeight)
+	baseDBHeight, pgDBHeight, err := getSyncd(updateAllAddresses, newPGIndexes,
+		fetchToHeight)
 	if err != nil {
 		requestShutdown()
 		return err
@@ -943,7 +951,7 @@ func _main(ctx context.Context) error {
 	// follow main sync loop. Before enabling the chain monitors, again ensure
 	// the DBs are at the node's best block.
 	ensureSync := func() error {
-		updateAllAddresses, updateAllVotes, newPGIndexes = false, false, false
+		newPGIndexes, updateAllAddresses = false, false
 		_, height, err := bitumdClient.GetBestBlock()
 		if err != nil {
 			return fmt.Errorf("unable to get block from node: %v", err)
@@ -951,7 +959,7 @@ func _main(ctx context.Context) error {
 
 		for baseDBHeight < height {
 			fetchToHeight = pgDBHeight + 1
-			baseDBHeight, pgDBHeight, err = getSyncd(updateAllAddresses, updateAllVotes,
+			baseDBHeight, pgDBHeight, err = getSyncd(updateAllAddresses,
 				newPGIndexes, fetchToHeight)
 			if err != nil {
 				requestShutdown()
@@ -962,15 +970,7 @@ func _main(ctx context.Context) error {
 				return fmt.Errorf("unable to get block from node: %v", err)
 			}
 		}
-
-		// Update the node height for the status API endpoint.
-		select {
-		case notify.NtfnChans.UpdateStatusNodeHeight <- uint32(height):
-		default:
-			log.Errorf("Failed to update node height with API status. Is StatusNtfnHandler started?")
-		}
-		// WiredDB.resyncDB is responsible for updating DB status via
-		// notify.NtfnChans.UpdateStatusDBHeight.
+		app.Status.SetHeight(uint32(height))
 
 		return nil
 	}
@@ -1089,19 +1089,21 @@ func _main(ctx context.Context) error {
 		}
 	}
 
-	// It initiates the updates fetch process for the proposal votes data after
-	// sync for the other tables is complete. It is only run if the system is on
-	// full mode. An error in fetching the updates should not stop the system
-	// functionality since it could be attributed to the external systems used.
-	log.Info("Running updates retrieval for Politeia's Proposals. Please wait...")
+	if !cfg.DisablePiParser {
+		// It initiates the updates fetch process for the proposal votes data after
+		// sync for the other tables is complete. It is only run if the system is on
+		// full mode. An error in fetching the updates should not stop the system
+		// functionality since it could be attributed to the external systems used.
+		log.Info("Running updates retrieval for Politeia's Proposals. Please wait...")
 
-	// Fetch updates for Politiea's Proposal history data via the parser.
-	commitsCount, err := pgDB.PiProposalsHistory()
-	if err != nil {
-		log.Errorf("pgDB.PiProposalsHistory failed : %v", err)
-	} else {
-		log.Infof("%d politeia's proposal (auxiliary db) commits were processed",
-			commitsCount)
+		// Fetch updates for Politiea's Proposal history data via the parser.
+		commitsCount, err := pgDB.PiProposalsHistory()
+		if err != nil {
+			log.Errorf("pgDB.PiProposalsHistory failed : %v", err)
+		} else {
+			log.Infof("%d politeia's proposal (auxiliary db) commits were processed",
+				commitsCount)
+		}
 	}
 
 	log.Infof("All ready, at height %d.", baseDBHeight)
@@ -1157,34 +1159,23 @@ func _main(ctx context.Context) error {
 	// collection for the explorer.
 
 	// Blockchain monitor for the collector
-	addrMap := make(map[string]txhelpers.TxAction) // for support of watched addresses
 	// On reorg, only update web UI since bitumsqlite's own reorg handler will
 	// deal with patching up the block info database.
 	reorgBlockDataSavers := []blockdata.BlockDataSaver{explore}
 	wsChainMonitor := blockdata.NewChainMonitor(ctx, collector, blockDataSavers,
-		reorgBlockDataSavers, &wg, addrMap, notify.NtfnChans.RecvTxBlockChan,
-		notify.NtfnChans.ReorgChanBlockData)
+		reorgBlockDataSavers)
 
 	// Blockchain monitor for the stake DB
-	sdbChainMonitor := stakeDB.NewChainMonitor(ctx, &wg, notify.NtfnChans.ReorgChanStakeDB)
+	sdbChainMonitor := stakeDB.NewChainMonitor(ctx)
 
 	// Blockchain monitor for the wired sqlite DB
-	WiredDBChainMonitor := baseDB.NewChainMonitor(ctx, collector, &wg,
-		notify.NtfnChans.ConnectChanWiredDB, notify.NtfnChans.ReorgChanWiredDB)
+	WiredDBChainMonitor := baseDB.NewChainMonitor(ctx, collector)
 
 	// Blockchain monitor for the aux (PG) DB
-	pgDBChainMonitor := pgDB.NewChainMonitor(ctx, &wg,
-		notify.NtfnChans.ConnectChanBitumpgDB, notify.NtfnChans.ReorgChanBitumpgDB)
+	pgDBChainMonitor := pgDB.NewChainMonitor(ctx)
 	if pgDBChainMonitor == nil {
 		return fmt.Errorf("Failed to enable bitumpg ChainMonitor. *ChainDB is nil.")
 	}
-
-	// Setup the synchronous handler functions called by the collectionQueue via
-	// OnBlockConnected.
-	collectionQueue.SetSynchronousHandlers([]func(*chainhash.Hash) error{
-		sdbChainMonitor.ConnectBlock, // 1. Stake DB for pool info
-		wsChainMonitor.ConnectBlock,  // 2. blockdata for regular block data collection and storage
-	})
 
 	// Initial data summary for web ui. stakedb must be at the same height, so
 	// we do this before starting the monitors.
@@ -1205,14 +1196,6 @@ func _main(ctx context.Context) error {
 		return fmt.Errorf("Failed to store initial block data with the PubSubHub: %v", err.Error())
 	}
 
-	// Register for notifications from bitumd. This also sets the daemon RPC
-	// client used by other functions in the notify/notification package (i.e.
-	// common ancestor identification in signalReorg).
-	cerr := notify.RegisterNodeNtfnHandlers(bitumdClient)
-	if cerr != nil {
-		return fmt.Errorf("RPC client error: %v (%v)", cerr.Error(), cerr.Cause())
-	}
-
 	// After this final node sync check, the monitors will handle new blocks.
 	// TODO: make this not racy at all by having sync stop at specified block.
 	if err = ensureSync(); err != nil {
@@ -1225,46 +1208,29 @@ func _main(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("Failed to determine base DB's best block: %v", err)
 	}
-	collectionQueue.SetPreviousBlock(bestHash, bestHeight)
+	notifier.SetPreviousBlock(bestHash, uint32(bestHeight))
 
-	// Start the monitors' event handlers.
+	// Notifications are sequenced by adding groups of notification handlers.
+	// The groups are run sequentially, but the handlers within a group are run
+	// concurrently. For example, register(A); register(B, C) will result in A
+	// running alone and completing, then B and C running concurrently.
+	notifier.RegisterBlockHandlerGroup(sdbChainMonitor.ConnectBlock)
+	notifier.RegisterBlockHandlerGroup(wsChainMonitor.ConnectBlock)
+	notifier.RegisterBlockHandlerLiteGroup(app.UpdateNodeHeight, mpm.BlockHandler)
+	notifier.RegisterReorgHandlerGroup(sdbChainMonitor.ReorgHandler)
+	notifier.RegisterReorgHandlerGroup(WiredDBChainMonitor.ReorgHandler,
+		wsChainMonitor.ReorgHandler, pgDBChainMonitor.ReorgHandler)
+	notifier.RegisterReorgHandlerGroup(charts.ReorgHandler)
+	notifier.RegisterTxHandlerGroup(mpm.TxHandler, insightSocketServer.SendNewTx)
 
-	// blockdata collector handlers
-	wg.Add(1)
-	// The blockdata reorg handler disables collection during reorg, leaving
-	// bitumsqlite to do the switch, except for the last block which gets
-	// collected and stored via reorgBlockDataSavers (for the explorer UI).
-	go wsChainMonitor.ReorgHandler()
+	// Register for notifications from bitumd. This also sets the daemon RPC
+	// client used by other functions in the notify/notification package (i.e.
+	// common ancestor identification in processReorg).
+	cerr := notifier.Listen(bitumdClient)
+	if cerr != nil {
+		return fmt.Errorf("RPC client error: %v (%v)", cerr.Error(), cerr.Cause())
+	}
 
-	// StakeDatabase
-	wg.Add(1)
-	go sdbChainMonitor.ReorgHandler()
-
-	// bitumsqlite does not handle new blocks except during reorg.
-	wg.Add(1)
-	go WiredDBChainMonitor.ReorgHandler()
-
-	// bitumpg also does not handle new blocks except during reorg.
-	wg.Add(1)
-	go pgDBChainMonitor.ReorgHandler()
-
-	wg.Add(1)
-	// charts cache drops all the records added since the common ancestor
-	// before initiating a cache update after all other reorgs have completed.
-	go charts.ReorgHandler(&wg, notify.NtfnChans.ReorgChartsCache)
-
-	// Begin listening on notify.NtfnChans.NewTxChan, and forwarding mempool
-	// events to psHub via the channels from HubRelays().
-	wg.Add(1)
-
-	// TxHandler also gets signaled about new blocks when a nil tx hash is sent
-	// on notify.NtfnChans.NewTxChan, which triggers a full mempool refresh
-	// followed by CollectAndStore, which provides the parsed data to all
-	// mempoolSavers via their StoreMPData method. This should include the
-	// PubSubHub and the base DB's MempoolDataCache.
-	go mpm.TxHandler(bitumdClient)
-
-	// Wait for notification handlers to quit.
 	wg.Wait()
 
 	return nil

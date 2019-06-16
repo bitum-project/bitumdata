@@ -39,6 +39,8 @@ testrepo () {
   (cd cmd/rebuilddb && go build)
   (cd cmd/rebuilddb2 && go build)
   (cd cmd/scanblocks && go build)
+  (cd pubsub/democlient && go build)
+  (cd testutil/apiload && go build)
   (cd testutil/dbload && go build)
 
   mkdir -p ./testutil/dbload/testsconfig/test.data
@@ -61,7 +63,7 @@ testrepo () {
 
   # run tests on all modules
   for MODPATH in $MODPATHS; do
-    env GORACE='halt_on_error=1' go test -v -race -tags chartests $(cd $MODPATH && go list -m)
+    env go test -v -tags chartests $(cd $MODPATH && go list -m)/...
   done
 
   # check linters
@@ -94,6 +96,6 @@ $DOCKER pull bitum/$DOCKER_IMAGE_TAG
 $DOCKER run --rm -it -v $(pwd):/src bitum/$DOCKER_IMAGE_TAG /bin/bash -c "\
   rsync -ra --include-from=<(git --git-dir=/src/.git ls-files) \
   --filter=':- .gitignore' \
-  /src/ /go/src/github.com/decred/$REPO/ && \
-  cd github.com/decred/$REPO/ && \
+  /src/ /go/src/github.com/bitum-project/$REPO/ && \
+  cd github.com/bitum-project/$REPO/ && \
   env GOVERSION=$GOVERSION GO111MODULE=on bash run_tests.sh"

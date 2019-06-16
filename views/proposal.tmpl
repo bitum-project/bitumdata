@@ -1,7 +1,7 @@
 {{define "proposal"}}
 <!DOCTYPE html>
 <html lang="en">
-    {{template "html-head" printf "Bitum Vote Proposal Pages"}}
+    {{template "html-head" printf "Bitum Proposal Charts"}}
         {{template "navbar" .}}
         {{with .Data}}
         <div class="container">
@@ -169,7 +169,7 @@
                                         <td class="text-right pr-2 py-2 vam nowrap xs-w117 font-weight-bold">Total:</td>
                                         <td>
                                             <span class="break-word py-1 lh1rem">
-                                                {{printf "%.0f" (percentage $v.VotesReceived $.Data.TotalVotes)}}% yes, {{if $.Data.PassPercentage}}{{$.Data.PassPercentage}}%{{end}} needed
+                                                {{printf "%.2f" (percentage $v.VotesReceived $.Data.TotalVotes)}}% yes, {{if $.Data.PassPercentage}}{{$.Data.PassPercentage}}%{{end}} needed
                                             </span>
                                         </td>
                                     </tr>

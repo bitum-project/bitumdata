@@ -56,9 +56,16 @@ func SetDBBestBlock(db *sql.DB, hash string, height int64) error {
 	return nil
 }
 
+// IBDComplete indicates whether initial block download was completed according
+// to the meta.ibd_complete flag.
+func IBDComplete(db *sql.DB) (ibdComplete bool, err error) {
+	err = db.QueryRow(internal.SelectMetaDBIbdComplete).Scan(&ibdComplete)
+	return
+}
+
 // SetIBDComplete set the ibd_complete (Initial Block Download complete) flag in
 // the meta table.
-func SetIBDComplete(db *sql.DB, ibdComplete bool) error {
+func SetIBDComplete(db SqlExecutor, ibdComplete bool) error {
 	numRows, err := sqlExec(db, internal.SetMetaDBIbdComplete,
 		"failed to update ibd_complete in meta table: ", ibdComplete)
 	if err != nil {
@@ -168,17 +175,124 @@ func DeleteDuplicateVins(db *sql.DB) (int64, error) {
 	existsIdx, err := ExistsIndex(db, "uix_vin")
 	if err != nil {
 		return 0, err
-	} else if !existsIdx {
+	}
+	if !existsIdx {
 		return sqlExec(db, internal.DeleteVinsDuplicateRows, execErrPrefix)
 	}
 
-	if isuniq, err := IsUniqueIndex(db, "uix_vin"); err != nil && err != sql.ErrNoRows {
+	isuniq, err := IsUniqueIndex(db, "uix_vin")
+	if err != nil && err != sql.ErrNoRows {
 		return 0, err
-	} else if isuniq {
+	}
+	if isuniq {
 		return 0, nil
 	}
 
 	return sqlExec(db, internal.DeleteVinsDuplicateRows, execErrPrefix)
+}
+
+func deleteDupVinsBrute(db *sql.DB) (int64, error) {
+	execErrPrefix := "failed to delete duplicate vins: "
+
+	// CockroachDB doesn't have CREATE TABLE .. (LIKE table), so we have to get
+	// the CREATE TABLE statement from the exinsting vins table.
+	var createStmt string
+	err := db.QueryRow(internal.ShowCreateVinsTable).Scan(&createStmt)
+	if err != nil {
+		err = fmt.Errorf("%s%v", execErrPrefix, err)
+		return 0, err
+	}
+	createStmt = strings.Replace(createStmt, "CREATE TABLE vins",
+		"CREATE TABLE vins_temp", 1)
+
+	var N0 int64
+	err = db.QueryRow(`SELECT COUNT(*) FROM vins;`).Scan(&N0)
+	if err != nil {
+		return 0, err
+	}
+
+	// Create the "vins_temp" table.
+	_, err = sqlExec(db, createStmt, execErrPrefix)
+	if err != nil {
+		return 0, err
+	}
+
+	// Populate vins_temp with the unique rows.
+	var N int64
+	N, err = sqlExec(db, internal.DistinctVinsToTempTable, execErrPrefix)
+	if err != nil {
+		return 0, err
+	}
+
+	// Drop the original vins table.
+	err = dropTable(db, "vins")
+	if err != nil {
+		return 0, err
+	}
+
+	// Rename vins_temp to vins.
+	_, err = sqlExec(db, internal.RenameVinsTemp, execErrPrefix)
+	if err != nil {
+		return 0, err
+	}
+	return N0 - N, nil
+}
+
+func deleteDupVinsAlt(db *sql.DB) (int64, error) {
+	execErrPrefix := "failed to delete duplicate vins: "
+
+	rows, err := db.Query(internal.SelectVinDupIDs)
+	if err != nil {
+		err = fmt.Errorf("%s%v", execErrPrefix, err)
+		return 0, err
+	}
+
+	var deleteIDs []int64
+	for rows.Next() {
+		var dupIDs []int64
+		if err = rows.Scan(&dupIDs); err != nil {
+			err = fmt.Errorf("%s%v", execErrPrefix, err)
+			return 0, err
+		}
+
+		fmt.Println(dupIDs)
+
+		if len(dupIDs) > 1 {
+			deleteIDs = append(deleteIDs, dupIDs[1:]...)
+		}
+	}
+
+	fmt.Println(deleteIDs)
+
+	// Delete the duplicate rows.
+	var N int64
+	N, err = sqlExec(db, internal.DeleteVinRows, execErrPrefix, deleteIDs)
+	if err != nil {
+		return 0, err
+	}
+	return N, nil
+}
+
+// DeleteDuplicateVinsCockroach deletes rows in vin with duplicate tx
+// information, leaving the one row with the lowest id.
+func DeleteDuplicateVinsCockroach(db *sql.DB) (int64, error) {
+	existsIdx, err := ExistsIndex(db, "uix_vin")
+	if err != nil {
+		return 0, err
+	}
+	if !existsIdx {
+		return deleteDupVinsBrute(db)
+	}
+
+	isuniq, err := IsUniqueIndex(db, "uix_vin")
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if isuniq {
+		return 0, nil
+	}
+
+	return deleteDupVinsBrute(db)
 }
 
 // DeleteDuplicateVouts deletes rows in vouts with duplicate tx information,
@@ -200,6 +314,110 @@ func DeleteDuplicateVouts(db *sql.DB) (int64, error) {
 	}
 
 	return sqlExec(db, internal.DeleteVoutDuplicateRows, execErrPrefix)
+}
+
+func deleteDupVoutsBrute(db *sql.DB) (int64, error) {
+	execErrPrefix := "failed to delete duplicate vouts: "
+
+	// CockroachDB doesn't have CREATE TABLE .. (LIKE table), so we have to get
+	// the CREATE TABLE statement from the exinsting vins table.
+	var createStmt string
+	err := db.QueryRow(internal.ShowCreateVoutsTable).Scan(&createStmt)
+	if err != nil {
+		err = fmt.Errorf("%s%v", execErrPrefix, err)
+		return 0, err
+	}
+	createStmt = strings.Replace(createStmt, "CREATE TABLE vouts",
+		"CREATE TABLE vouts_temp", 1)
+
+	var N0 int64
+	err = db.QueryRow(`SELECT COUNT(*) FROM vouts;`).Scan(&N0)
+	if err != nil {
+		return 0, err
+	}
+
+	// Create the "vouts_temp" table.
+	_, err = sqlExec(db, createStmt, execErrPrefix)
+	if err != nil {
+		return 0, err
+	}
+
+	// Populate vouts_temp with the unique rows.
+	var N int64
+	N, err = sqlExec(db, internal.DistinctVoutsToTempTable, execErrPrefix)
+	if err != nil {
+		return 0, err
+	}
+
+	// Drop the original vouts table.
+	err = dropTable(db, "vouts")
+	if err != nil {
+		return 0, err
+	}
+
+	// Rename vouts_temp to vouts.
+	_, err = sqlExec(db, internal.RenameVoutsTemp, execErrPrefix)
+	if err != nil {
+		return 0, err
+	}
+	return N0 - N, nil
+}
+
+func deleteDupVoutsAlt(db *sql.DB) (int64, error) {
+	execErrPrefix := "failed to delete duplicate vouts: "
+
+	rows, err := db.Query(internal.SelectVoutDupIDs)
+	if err != nil {
+		err = fmt.Errorf("%s%v", execErrPrefix, err)
+		return 0, err
+	}
+
+	var deleteIDs []int64
+	for rows.Next() {
+		var dupIDs []int64
+		if err = rows.Scan(&dupIDs); err != nil {
+			err = fmt.Errorf("%s%v", execErrPrefix, err)
+			return 0, err
+		}
+
+		fmt.Println(dupIDs)
+
+		if len(dupIDs) > 1 {
+			deleteIDs = append(deleteIDs, dupIDs[1:]...)
+		}
+	}
+
+	fmt.Println(deleteIDs)
+
+	// Delete the duplicate rows.
+	var N int64
+	N, err = sqlExec(db, internal.DeleteVoutRows, execErrPrefix, deleteIDs)
+	if err != nil {
+		return 0, err
+	}
+	return N, nil
+}
+
+// DeleteDuplicateVoutsCockroach deletes rows in vouts with duplicate tx
+// information, leaving the one row with the highest id.
+func DeleteDuplicateVoutsCockroach(db *sql.DB) (int64, error) {
+	existsIdx, err := ExistsIndex(db, "uix_vout_txhash_ind")
+	if err != nil {
+		return 0, err
+	}
+	if !existsIdx {
+		return deleteDupVoutsBrute(db)
+	}
+
+	isuniq, err := IsUniqueIndex(db, "uix_vout_txhash_ind")
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if isuniq {
+		return 0, nil
+	}
+
+	return deleteDupVoutsBrute(db)
 }
 
 // DeleteDuplicateTxns deletes rows in transactions with duplicate tx-block
@@ -1025,14 +1243,14 @@ func retrieveTicketsByDate(ctx context.Context, db *sql.DB, maturityBlock int64,
 	tickets := new(dbtypes.PoolTicketsData)
 	for rows.Next() {
 		var immature, live uint64
-		var timestamp dbtypes.TimeDef
+		var timestamp time.Time
 		var price, total float64
 		err = rows.Scan(&timestamp, &price, &immature, &live)
 		if err != nil {
 			return nil, fmt.Errorf("retrieveTicketsByDate %v", err)
 		}
 
-		tickets.Time = append(tickets.Time, timestamp)
+		tickets.Time = append(tickets.Time, dbtypes.NewTimeDef(timestamp))
 		tickets.Immature = append(tickets.Immature, immature)
 		tickets.Live = append(tickets.Live, live)
 
@@ -1079,32 +1297,28 @@ func retrieveTicketByPrice(ctx context.Context, db *sql.DB, maturityBlock int64)
 // grouping used here i.e. solo, pooled and tixsplit is just a guessing based on
 // commonly structured ticket purchases.
 func retrieveTicketsGroupedByType(ctx context.Context, db *sql.DB) (*dbtypes.PoolTicketsData, error) {
-	var entry dbtypes.PoolTicketsData
 	rows, err := db.QueryContext(ctx, internal.SelectTicketsByType)
 	if err != nil {
 		return nil, err
 	}
 	defer closeRows(rows)
 
+	tickets := new(dbtypes.PoolTicketsData)
 	for rows.Next() {
-		var txType, txTypeCount uint64
-		err = rows.Scan(&txType, &txTypeCount)
+		var output, count uint64
 
-		if err != nil {
+		if err = rows.Scan(&output, &count); err != nil {
 			return nil, fmt.Errorf("retrieveTicketsGroupedByType %v", err)
 		}
 
-		switch txType {
-		case 1:
-			entry.Solo = txTypeCount
-		case 2:
-			entry.Pooled = txTypeCount
-		case 3:
-			entry.TxSplit = txTypeCount
-		}
+		tickets.Count = append(tickets.Count, count)
+		// sstxcommitment count is calculated from all the outputs available.
+		// It is a script hash used for payout of voting and is calculated using
+		// the formula (n-1)/2 where n = all possible outputs.
+		tickets.Outputs = append(tickets.Outputs, (output-1)/2)
 	}
 
-	return &entry, nil
+	return tickets, nil
 }
 
 // SetPoolStatusForTickets sets the ticket pool status for the tickets specified
@@ -1463,9 +1677,9 @@ func countMerged(ctx context.Context, db *sql.DB, address, query string) (count 
 }
 
 // RetrieveAddressUTXOs gets the unspent transaction outputs (UTXOs) paying to
-// the specified address. The input current block height is used to compute
-// confirmations of the located transactions.
-func RetrieveAddressUTXOs(ctx context.Context, db *sql.DB, address string, currentBlockHeight int64) ([]apitypes.AddressTxnOutput, error) {
+// the specified address as a []*apitypes.AddressTxnOutput. The input current
+// block height is used to compute confirmations of the located transactions.
+func RetrieveAddressUTXOs(ctx context.Context, db *sql.DB, address string, currentBlockHeight int64) ([]*apitypes.AddressTxnOutput, error) {
 	stmt, err := db.Prepare(internal.SelectAddressUnspentWithTxn)
 	if err != nil {
 		log.Error(err)
@@ -1479,12 +1693,12 @@ func RetrieveAddressUTXOs(ctx context.Context, db *sql.DB, address string, curre
 	}
 	defer closeRows(rows)
 
-	var outputs []apitypes.AddressTxnOutput
+	var outputs []*apitypes.AddressTxnOutput
 	for rows.Next() {
 		pkScript := []byte{}
 		var blockHeight, atoms int64
 		var blockTime dbtypes.TimeDef
-		txnOutput := apitypes.AddressTxnOutput{}
+		txnOutput := new(apitypes.AddressTxnOutput)
 		if err = rows.Scan(&txnOutput.Address, &txnOutput.TxnID,
 			&atoms, &blockHeight, &blockTime, &txnOutput.Vout, &pkScript); err != nil {
 			log.Error(err)
@@ -1495,6 +1709,46 @@ func RetrieveAddressUTXOs(ctx context.Context, db *sql.DB, address string, curre
 		txnOutput.Satoshis = atoms
 		txnOutput.Height = blockHeight
 		txnOutput.Confirmations = currentBlockHeight - blockHeight + 1
+		outputs = append(outputs, txnOutput)
+	}
+
+	return outputs, nil
+}
+
+// RetrieveAddressDbUTXOs gets the unspent transaction outputs (UTXOs) paying to
+// the specified address as a []*dbtypes.AddressTxnOutput. The input current
+// block height is used to compute confirmations of the located transactions.
+func RetrieveAddressDbUTXOs(ctx context.Context, db *sql.DB, address string) ([]*dbtypes.AddressTxnOutput, error) {
+	stmt, err := db.Prepare(internal.SelectAddressUnspentWithTxn)
+	if err != nil {
+		log.Error(err)
+		return nil, err
+	}
+	rows, err := stmt.QueryContext(ctx, address)
+	_ = stmt.Close()
+	if err != nil {
+		log.Error(err)
+		return nil, err
+	}
+	defer closeRows(rows)
+
+	var outputs []*dbtypes.AddressTxnOutput
+	for rows.Next() {
+		pkScript := []byte{}
+		var txHash string
+		var blockTime dbtypes.TimeDef
+		txnOutput := new(dbtypes.AddressTxnOutput)
+		if err = rows.Scan(&txnOutput.Address, &txHash,
+			&txnOutput.Atoms, &txnOutput.Height, &blockTime,
+			&txnOutput.Vout, &pkScript); err != nil {
+			log.Error(err)
+		}
+		txnOutput.BlockTime = blockTime.UNIX()
+		err = chainhash.Decode(&txnOutput.TxHash, txHash)
+		if err != nil {
+			log.Error(err)
+		}
+		txnOutput.PkScript = hex.EncodeToString(pkScript)
 		outputs = append(outputs, txnOutput)
 	}
 
@@ -2339,8 +2593,9 @@ func RetrieveVoutsByIDs(ctx context.Context, db *sql.DB, voutDbIDs []uint64) ([]
 	return vouts, nil
 }
 
+// RetrieveUTXOs gets the entire UTXO set from the vouts and vins tables.
 func RetrieveUTXOs(ctx context.Context, db *sql.DB) ([]dbtypes.UTXO, error) {
-	height, _, _, err := RetrieveBestBlockHeight(ctx, db)
+	_, height, err := DBBestBlock(ctx, db)
 	if err != nil {
 		return nil, err
 	}
@@ -2426,7 +2681,7 @@ func SetSpendingForVinDbIDs(db *sql.DB, vinDbIDs []uint64) ([]int64, int64, erro
 
 		// Set the spending tx info (addresses table) for the funding transaction
 		// rows indicated by the vin DB ID.
-		addressRowsUpdated[iv], err = setSpendingForFundingOP(dbtx,
+		addressRowsUpdated[iv], err = SetSpendingForFundingOP(dbtx,
 			prevOutHash, prevOutVoutInd, txHash, txVinInd)
 		if err != nil {
 			return addressRowsUpdated, 0, fmt.Errorf(`insertSpendingTxByPrptStmt: `+
@@ -2469,7 +2724,7 @@ func SetSpendingForVinDbID(db *sql.DB, vinDbID uint64) (int64, error) {
 
 	// Set the spending tx info (addresses table) for the funding transaction
 	// rows indicated by the vin DB ID.
-	N, err := setSpendingForFundingOP(dbtx, prevOutHash, prevOutVoutInd,
+	N, err := SetSpendingForFundingOP(dbtx, prevOutHash, prevOutVoutInd,
 		txHash, txVinInd)
 	if err != nil {
 		return 0, fmt.Errorf(`RowsAffected: %v + %v (rollback)`,
@@ -2486,19 +2741,6 @@ func SetSpendingForFundingOP(db SqlExecutor, fundingTxHash string, fundingTxVout
 	// Update the matchingTxHash for the funding tx output. matchingTxHash here
 	// is the hash of the funding tx.
 	res, err := db.Exec(internal.SetAddressMatchingTxHashForOutpoint,
-		spendingTxHash, fundingTxHash, fundingTxVoutIndex)
-	if err != nil || res == nil {
-		return 0, fmt.Errorf("SetAddressMatchingTxHashForOutpoint: %v", err)
-	}
-
-	return res.RowsAffected()
-}
-
-func setSpendingForFundingOP(dbtx *sql.Tx, fundingTxHash string, fundingTxVoutIndex uint32,
-	spendingTxHash string, _ /*spendingTxVinIndex*/ uint32) (int64, error) {
-	// Update the matchingTxHash for the funding tx output. matchingTxHash here
-	// is the hash of the funding tx.
-	res, err := dbtx.Exec(internal.SetAddressMatchingTxHashForOutpoint,
 		spendingTxHash, fundingTxHash, fundingTxVoutIndex)
 	if err != nil || res == nil {
 		return 0, fmt.Errorf("SetAddressMatchingTxHashForOutpoint: %v", err)
@@ -2595,7 +2837,7 @@ func insertSpendingAddressRow(tx *sql.Tx, fundingTxHash string, fundingTxVoutInd
 
 	if updateFundingRow {
 		// Update the matching funding addresses row with the spending info.
-		return setSpendingForFundingOP(tx, fundingTxHash, fundingTxVoutIndex,
+		return SetSpendingForFundingOP(tx, fundingTxHash, fundingTxVoutIndex,
 			spendingTxHash, spendingTxVinIndex)
 	}
 	return 0, nil
@@ -3056,15 +3298,11 @@ func appendChartBlocks(charts *cache.ChartData, rows *sql.Rows) error {
 	return nil
 }
 
-//  retrieveWindowStats(ctx context.Context, db *sql.DB, interval int64,
-// timeArr []dbtypes.TimeDef, priceArr, powArr []float64) ([]dbtypes.TimeDef,
-// []float64, []float64, error) {
-
 // retrieveWindowStats fetches the ticket-price and pow-difficulty
 // charts data source from the blocks table. These data is fetched at an
 // interval of chaincfg.Params.StakeDiffWindowSize.
 func retrieveWindowStats(ctx context.Context, db *sql.DB, charts *cache.ChartData) (*sql.Rows, error) {
-	rows, err := db.QueryContext(ctx, internal.SelectBlocksTicketsPrice, charts.DiffInterval, charts.TicketPriceTip())
+	rows, err := db.QueryContext(ctx, internal.SelectBlocksTicketsPrice, charts.TicketPriceTip())
 	if err != nil {
 		return nil, err
 	}
@@ -3073,19 +3311,30 @@ func retrieveWindowStats(ctx context.Context, db *sql.DB, charts *cache.ChartDat
 
 // Appends the results from retrieveWindowStats to the provided ChartData.
 // This is the Appender half of a pair that make up a cache.ChartUpdater.
+// Since tickets count per window cannot be done on the db, windows grouping
+// and tickets count is done here.
 func appendWindowStats(charts *cache.ChartData, rows *sql.Rows) error {
 	defer closeRows(rows)
 	windows := charts.Windows
+	windowSize := uint64(charts.DiffInterval)
+	var ticketsCount uint64
 	for rows.Next() {
 		var timestamp time.Time
-		var price uint64
 		var difficulty float64
-		if err := rows.Scan(&price, &timestamp, &difficulty); err != nil {
+		var price, height, count uint64
+		if err := rows.Scan(&price, &timestamp, &difficulty, &height, &count); err != nil {
 			return err
 		}
-		windows.TicketPrice = append(windows.TicketPrice, price)
-		windows.PowDiff = append(windows.PowDiff, difficulty)
-		windows.Time = append(windows.Time, uint64(timestamp.Unix()))
+
+		ticketsCount += count
+		if (height % windowSize) == 0 {
+			windows.TicketPrice = append(windows.TicketPrice, price)
+			windows.PowDiff = append(windows.PowDiff, difficulty)
+			windows.Time = append(windows.Time, uint64(timestamp.Unix()))
+			windows.StakeCount = append(windows.StakeCount, ticketsCount)
+
+			ticketsCount = 0
+		}
 	}
 
 	return nil
@@ -3117,6 +3366,43 @@ func appendCoinSupply(charts *cache.ChartData, rows *sql.Rows) error {
 	// Set the genesis block to zero because the DB stores it as -1
 	if len(blocks.NewAtoms) > 0 {
 		blocks.NewAtoms[0] = 0
+	}
+	return nil
+}
+
+// retrieveMissedVotes fetches the missed votes data from the misses and transactions tables.
+func retrieveMissedVotes(ctx context.Context, db *sql.DB, charts *cache.ChartData) (*sql.Rows, error) {
+	rows, err := db.QueryContext(ctx, internal.SelectMissesVotesChartData, charts.MissedVotesTip())
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// Append the results from retrieveMissedVotes to the provided ChartData.
+// This is the Appender half of a pair that make up a cache.ChartUpdater.
+func appendMissedVotes(charts *cache.ChartData, rows *sql.Rows) error {
+	defer closeRows(rows)
+	windows := charts.Windows
+	windowSize := uint64(charts.DiffInterval)
+	if len(windows.MissedVotes) == 0 {
+		windows.MissedVotes = append(windows.MissedVotes, make([]uint64, charts.StartPOS/charts.DiffInterval)...)
+	}
+	startHeight := windowSize * uint64(len(windows.MissedVotes))
+	var count uint64
+	for rows.Next() {
+		var height, tickets uint64
+		if err := rows.Scan(&height, &tickets); err != nil {
+			return err
+		}
+
+		count += tickets
+		if height >= startHeight {
+			windows.MissedVotes = append(windows.MissedVotes, count)
+
+			count = 0
+			startHeight += windowSize
+		}
 	}
 	return nil
 }
@@ -3305,6 +3591,11 @@ func retrieveProposalVotesData(ctx context.Context, db *sql.DB,
 
 // --- blocks and block_chain tables ---
 
+// InsertBlock inserts the specified dbtypes.Block as with the given
+// valid/mainchain status. If checked is true, an upsert statement is used so
+// that a unique constraint violation will result in an update instead of
+// attempting to insert a duplicate row. If checked is false and there is a
+// duplicate row, an error will be returned.
 func InsertBlock(db *sql.DB, dbBlock *dbtypes.Block, isValid, isMainchain, checked bool) (uint64, error) {
 	insertStatement := internal.MakeBlockInsertStatement(dbBlock, checked)
 	var id uint64
@@ -3613,7 +3904,7 @@ func UpdateTransactionsValid(db *sql.DB, blockHash string, isValid bool) (int64,
 
 // UpdateVotesMainchain sets the is_mainchain column for the votes in the
 // specified block.
-func UpdateVotesMainchain(db *sql.DB, blockHash string, isMainchain bool) (int64, error) {
+func UpdateVotesMainchain(db SqlExecutor, blockHash string, isMainchain bool) (int64, error) {
 	numRows, err := sqlExec(db, internal.UpdateVotesMainchainByBlock,
 		"failed to update votes is_mainchain: ", isMainchain, blockHash)
 	if err != nil {
@@ -3624,7 +3915,7 @@ func UpdateVotesMainchain(db *sql.DB, blockHash string, isMainchain bool) (int64
 
 // UpdateTicketsMainchain sets the is_mainchain column for the tickets in the
 // specified block.
-func UpdateTicketsMainchain(db *sql.DB, blockHash string, isMainchain bool) (int64, error) {
+func UpdateTicketsMainchain(db SqlExecutor, blockHash string, isMainchain bool) (int64, error) {
 	numRows, err := sqlExec(db, internal.UpdateTicketsMainchainByBlock,
 		"failed to update tickets is_mainchain: ", isMainchain, blockHash)
 	if err != nil {
@@ -3635,7 +3926,7 @@ func UpdateTicketsMainchain(db *sql.DB, blockHash string, isMainchain bool) (int
 
 // UpdateAddressesMainchainByIDs sets the valid_mainchain column for the
 // addresses specified by their vin (spending) or vout (funding) row IDs.
-func UpdateAddressesMainchainByIDs(db *sql.DB, vinsBlk, voutsBlk []dbtypes.UInt64Array, isValidMainchain bool) (numSpendingRows, numFundingRows int64, err error) {
+func UpdateAddressesMainchainByIDs(db SqlExecutor, vinsBlk, voutsBlk []dbtypes.UInt64Array, isValidMainchain bool) (numSpendingRows, numFundingRows int64, err error) {
 	// Spending/vins: Set valid_mainchain for the is_funding=false addresses
 	// table rows using the vins row ids.
 	var numUpdated int64
@@ -3667,7 +3958,7 @@ func UpdateAddressesMainchainByIDs(db *sql.DB, vinsBlk, voutsBlk []dbtypes.UInt6
 
 // UpdateLastBlockValid updates the is_valid column of the block specified by
 // the row id for the blocks table.
-func UpdateLastBlockValid(db *sql.DB, blockDbID uint64, isValid bool) error {
+func UpdateLastBlockValid(db SqlExecutor, blockDbID uint64, isValid bool) error {
 	numRows, err := sqlExec(db, internal.UpdateLastBlockValid,
 		"failed to update last block validity: ", blockDbID, isValid)
 	if err != nil {

@@ -295,7 +295,7 @@ func sideChainTips(allTips []bitumjson.GetChainTipsResult) (sideTips []bitumjson
 // side chain, and its previous block is the main/side common ancestor, which is
 // not included in the slice since it is main chain. The last block in the slice
 // is thus the side chain tip.
-func SideChainFull(client *rpcclient.Client, tipHash string) ([]string, error) {
+func SideChainFull(client BlockFetcher, tipHash string) ([]string, error) {
 	// Do not assume specified tip hash is even side chain.
 	var sideChain []string
 
@@ -338,7 +338,7 @@ func reverseStringSlice(s []string) {
 }
 
 // GetTransactionVerboseByID get a transaction by transaction id
-func GetTransactionVerboseByID(client *rpcclient.Client, txhash *chainhash.Hash) (*bitumjson.TxRawResult, error) {
+func GetTransactionVerboseByID(client txhelpers.VerboseTransactionGetter, txhash *chainhash.Hash) (*bitumjson.TxRawResult, error) {
 	txraw, err := client.GetRawTransactionVerbose(txhash)
 	if err != nil {
 		log.Errorf("GetRawTransactionVerbose failed for: %v", txhash)
@@ -440,11 +440,12 @@ func CommonAncestor(client BlockFetcher, hashA, hashB chainhash.Hash) (*chainhas
 			break // hashA(==hashB) is the common ancestor.
 		}
 	}
-
 	// hashA == hashB
 	return &hashA, chainA, chainB, nil
 }
 
+// BlockHashGetter is an interface implementing GetBlockHash to retrieve a block
+// hash from a height.
 type BlockHashGetter interface {
 	GetBlockHash(int64) (*chainhash.Hash, error)
 }
@@ -476,7 +477,7 @@ func OrphanedTipLength(ctx context.Context, client BlockHashGetter,
 		}
 		bitumdHash, err = client.GetBlockHash(commonHeight)
 		if err != nil {
-			return -1, fmt.Errorf("Unable to retrive bitumd block at height %d: %v", commonHeight, err)
+			return -1, fmt.Errorf("Unable to retrieve bitumd block at height %d: %v", commonHeight, err)
 		}
 		if bitumdHash.String() == dbHash {
 			break
@@ -506,6 +507,7 @@ func GetChainWork(client BlockFetcher, hash *chainhash.Hash) (string, error) {
 	return header.ChainWork, nil
 }
 
+// MempoolAddressChecker is an interface implementing UnconfirmedTxnsForAddress
 type MempoolAddressChecker interface {
 	UnconfirmedTxnsForAddress(address string) (*txhelpers.AddressOutpoints, int64, error)
 }
@@ -515,10 +517,13 @@ type mempoolAddressChecker struct {
 	params *chaincfg.Params
 }
 
+// UnconfirmedTxnsForAddress implements MempoolAddressChecker.
 func (m *mempoolAddressChecker) UnconfirmedTxnsForAddress(address string) (*txhelpers.AddressOutpoints, int64, error) {
 	return UnconfirmedTxnsForAddress(m.client, address, m.params)
 }
 
+// NewMempoolAddressChecker creates a new MempoolAddressChecker from an RPC
+// client for the given network.
 func NewMempoolAddressChecker(client *rpcclient.Client, params *chaincfg.Params) MempoolAddressChecker {
 	return &mempoolAddressChecker{client, params}
 }
@@ -578,7 +583,7 @@ func UnconfirmedTxnsForAddress(client *rpcclient.Client, address string, params 
 
 // APITransaction uses the RPC client to retrieve the specified transaction, and
 // convert the data into a *apitypes.Tx.
-func APITransaction(client *rpcclient.Client, txid *chainhash.Hash) (tx *apitypes.Tx, hex string, err error) {
+func APITransaction(client txhelpers.VerboseTransactionGetter, txid *chainhash.Hash) (tx *apitypes.Tx, hex string, err error) {
 	txraw, err := GetTransactionVerboseByID(client, txid)
 	if err != nil {
 		err = fmt.Errorf("APITransaction failed for %v: %v", txid, err)

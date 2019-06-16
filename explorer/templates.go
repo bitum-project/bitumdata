@@ -5,7 +5,6 @@
 package explorer
 
 import (
-	"bytes"
 	"encoding/hex"
 	"fmt"
 	"html/template"
@@ -86,7 +85,7 @@ func (t *templates) execTemplateToString(name string, data interface{}) (string,
 		return "", fmt.Errorf("Template %s not known", name)
 	}
 
-	var page bytes.Buffer
+	var page strings.Builder
 	err := temp.template.ExecuteTemplate(&page, name, data)
 	return page.String(), err
 }
@@ -544,7 +543,7 @@ func makeTemplateFuncMap(params *chaincfg.Params) template.FuncMap {
 			return false
 		},
 		"redirectToTestnet": func(netName string, message string) bool {
-			if netName != "Testnet" && strings.Contains(message, "testnet") {
+			if netName != testnetNetName && strings.Contains(message, "testnet") {
 				return true
 			}
 			return false
@@ -568,6 +567,17 @@ func makeTemplateFuncMap(params *chaincfg.Params) template.FuncMap {
 				return ""
 			}
 			return addrPKH.EncodeAddress()
+		},
+		"toAbsValue": math.Abs,
+		"toFloat64": func(x uint32) float64 {
+			return float64(x)
+		},
+		"toInt": func(str string) int {
+			intStr, err := strconv.Atoi(str)
+			if err != nil {
+				return 0
+			}
+			return intStr
 		},
 	}
 }

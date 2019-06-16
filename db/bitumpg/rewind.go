@@ -47,35 +47,47 @@ import (
 	"github.com/bitum-project/bitumdata/db/bitumpg/internal"
 )
 
-func deleteMissesForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
+func deleteMissesForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
 	return sqlExec(dbTx, internal.DeleteMisses, "failed to delete misses", hash)
 }
 
-func deleteVotesForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
+func deleteVotesForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
 	return sqlExec(dbTx, internal.DeleteVotes, "failed to delete votes", hash)
 }
 
-func deleteTicketsForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
-	return sqlExec(dbTx, internal.DeleteTickets, "failed to delete tickets", hash)
+func deleteTicketsForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
+	return sqlExec(dbTx, internal.DeleteTicketsSimple, "failed to delete tickets", hash)
 }
 
-func deleteTransactionsForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
-	return sqlExec(dbTx, internal.DeleteTransactions, "failed to delete transactions", hash)
+func deleteTransactionsForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
+	return sqlExec(dbTx, internal.DeleteTransactionsSimple, "failed to delete transactions", hash)
 }
 
-func deleteVoutsForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
+func deleteVoutsForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
 	return sqlExec(dbTx, internal.DeleteVouts, "failed to delete vouts", hash)
 }
 
-func deleteVinsForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
+func deleteVoutsForBlockSubQry(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
+	return sqlExec(dbTx, internal.DeleteVoutsSubQry, "failed to delete vouts", hash)
+}
+
+func deleteVinsForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
 	return sqlExec(dbTx, internal.DeleteVins, "failed to delete vins", hash)
 }
 
-func deleteAddressesForBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
+func deleteVinsForBlockSubQry(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
+	return sqlExec(dbTx, internal.DeleteVinsSubQry, "failed to delete vins", hash)
+}
+
+func deleteAddressesForBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
 	return sqlExec(dbTx, internal.DeleteAddresses, "failed to delete addresses", hash)
 }
 
-func deleteBlock(dbTx *sql.Tx, hash string) (rowsDeleted int64, err error) {
+func deleteAddressesForBlockSubQry(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
+	return sqlExec(dbTx, internal.DeleteAddressesSubQry, "failed to delete addresses", hash)
+}
+
+func deleteBlock(dbTx SqlExecutor, hash string) (rowsDeleted int64, err error) {
 	return sqlExec(dbTx, internal.DeleteBlock, "failed to delete block", hash)
 }
 
@@ -150,24 +162,24 @@ func DeleteBlockData(ctx context.Context, db *sql.DB, hash string) (res dbtypes.
 	res.Timings = new(dbtypes.DeletionSummary)
 
 	start := time.Now()
-	if res.Vins, err = deleteVinsForBlock(dbTx, hash); err != nil {
-		err = fmt.Errorf(`deleteVinsForBlock failed with "%v". Rollback: %v`,
+	if res.Vins, err = deleteVinsForBlockSubQry(dbTx, hash); err != nil {
+		err = fmt.Errorf(`deleteVinsForBlockSubQry failed with "%v". Rollback: %v`,
 			err, dbTx.Rollback())
 		return
 	}
 	res.Timings.Vins = time.Since(start).Nanoseconds()
 
 	start = time.Now()
-	if res.Vouts, err = deleteVoutsForBlock(dbTx, hash); err != nil {
-		err = fmt.Errorf(`deleteVoutsForBlock failed with "%v". Rollback: %v`,
+	if res.Vouts, err = deleteVoutsForBlockSubQry(dbTx, hash); err != nil {
+		err = fmt.Errorf(`deleteVoutsForBlockSubQry failed with "%v". Rollback: %v`,
 			err, dbTx.Rollback())
 		return
 	}
 	res.Timings.Vouts = time.Since(start).Nanoseconds()
 
 	start = time.Now()
-	if res.Addresses, err = deleteAddressesForBlock(dbTx, hash); err != nil {
-		err = fmt.Errorf(`deleteAddressesForBlock failed with "%v". Rollback: %v`,
+	if res.Addresses, err = deleteAddressesForBlockSubQry(dbTx, hash); err != nil {
+		err = fmt.Errorf(`deleteAddressesForBlockSubQry failed with "%v". Rollback: %v`,
 			err, dbTx.Rollback())
 		return
 	}

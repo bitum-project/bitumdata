@@ -62,12 +62,14 @@ type CommonPageData struct {
 const (
 	defaultErrorCode    = "Something went wrong..."
 	defaultErrorMessage = "Try refreshing... it usually fixes things."
+	pageDisabledCode    = "%s has been disabled for now."
 	wrongNetwork        = "Wrong Network"
 )
 
 // expStatus defines the various status types supported by the system.
 type expStatus string
 
+// These are the explorer status messages used by the status page.
 const (
 	ExpStatusError          expStatus = "Error"
 	ExpStatusNotFound       expStatus = "Not Found"
@@ -75,6 +77,7 @@ const (
 	ExpStatusNotSupported   expStatus = "Not Supported"
 	ExpStatusBadRequest     expStatus = "Bad Request"
 	ExpStatusNotImplemented expStatus = "Not Implemented"
+	ExpStatusPageDisabled   expStatus = "Page Disabled"
 	ExpStatusWrongNetwork   expStatus = "Wrong Network"
 	ExpStatusDeprecated     expStatus = "Deprecated"
 	ExpStatusSyncing        expStatus = "Blocks Syncing"
@@ -111,7 +114,7 @@ func netName(chainParams *chaincfg.Params) string {
 		return "invalid"
 	}
 	if strings.HasPrefix(strings.ToLower(chainParams.Name), "testnet") {
-		return "Testnet"
+		return testnetNetName
 	}
 	return strings.Title(chainParams.Name)
 }
@@ -180,13 +183,14 @@ func (exp *explorerUI) Home(w http.ResponseWriter, r *http.Request) {
 
 	str, err := exp.templates.execTemplateToString("home", struct {
 		*CommonPageData
-		Info        *types.HomeInfo
-		Mempool     *types.MempoolInfo
-		BestBlock   *types.BlockBasic
-		BlockTally  []int
-		Consensus   int
-		Blocks      []*types.BlockBasic
-		Conversions *homeConversions
+		Info          *types.HomeInfo
+		Mempool       *types.MempoolInfo
+		BestBlock     *types.BlockBasic
+		BlockTally    []int
+		Consensus     int
+		Blocks        []*types.BlockBasic
+		Conversions   *homeConversions
+		PercentChange float64
 	}{
 		CommonPageData: exp.commonData(r),
 		Info:           homeInfo,
@@ -196,6 +200,7 @@ func (exp *explorerUI) Home(w http.ResponseWriter, r *http.Request) {
 		Consensus:      consensus,
 		Blocks:         blocks,
 		Conversions:    conversions,
+		PercentChange:  homeInfo.PoolInfo.PercentTarget - 100,
 	})
 
 	inv.RUnlock()
@@ -772,7 +777,7 @@ func (exp *explorerUI) TxPage(w http.ResponseWriter, r *http.Request) {
 
 		// Coinbase transactions are regular, but call them coinbase for the page.
 		if tx.Coinbase {
-			tx.Type = "Coinbase"
+			tx.Type = types.CoinbaseTypeStr
 		}
 
 		// Retrieve vouts from DB.
@@ -962,7 +967,7 @@ func (exp *explorerUI) TxPage(w http.ResponseWriter, r *http.Request) {
 
 	// For any coinbase transactions look up the total block fees to include
 	// as part of the inputs.
-	if tx.Type == "Coinbase" {
+	if tx.Type == types.CoinbaseTypeStr {
 		data := exp.blockData.GetExplorerBlock(tx.BlockHash)
 		if data == nil {
 			log.Errorf("Unable to get block %s", tx.BlockHash)
@@ -1124,7 +1129,7 @@ func (exp *explorerUI) TxPage(w http.ResponseWriter, r *http.Request) {
 	for idx := range tx.Vin {
 		vin := &tx.Vin[idx]
 		if vin.Coinbase != "" {
-			vin.DisplayText = "Coinbase"
+			vin.DisplayText = types.CoinbaseTypeStr
 		} else if vin.Stakebase != "" {
 			vin.DisplayText = "Stakebase"
 		} else {
@@ -1284,6 +1289,9 @@ func (exp *explorerUI) AddressPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Debugf(`"address" template HTML size: %.2f kiB (%s, %v, %d)`,
+		float64(len(str))/1024.0, address, txnType, addrData.NumTransactions)
+
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Turbolinks-Location", r.URL.RequestURI())
 	w.WriteHeader(http.StatusOK)
@@ -1328,10 +1336,8 @@ func (exp *explorerUI) AddressTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// jsonBytes, err := json.Marshal(response)
-	// if err != nil {
-	// 	jsonBytes = []byte("JSON error")
-	// }
+	log.Debugf(`"addresstable" template HTML size: %.2f kiB (%s, %v, %d)`,
+		float64(len(response.HTML))/1024.0, address, txnType, addrData.NumTransactions)
 
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
@@ -1340,7 +1346,6 @@ func (exp *explorerUI) AddressTable(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Debug(err)
 	}
-	//w.Write(jsonBytes)
 }
 
 // parseAddressParams is used by both /address and /addresstable.
@@ -1495,7 +1500,7 @@ func (exp *explorerUI) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// This is be unnecessarily duplicative and possible very slow for a very
-	// active addresss.
+	// active addresses.
 	addrHist, _, _ := exp.explorerSource.AddressHistory(searchStr,
 		1, 0, dbtypes.AddrTxnAll)
 	if len(addrHist) > 0 {
@@ -1542,11 +1547,13 @@ func (exp *explorerUI) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if the search term references a proposal token.
-	proposalInfo, err := exp.proposalsSource.ProposalByToken(searchStr)
-	if err == nil && proposalInfo.RefID != "" {
-		http.Redirect(w, r, "/proposal/"+proposalInfo.RefID, http.StatusPermanentRedirect)
-		return
+	if exp.proposalsSource != nil {
+		// Check if the search term references a proposal token.
+		proposalInfo, err := exp.proposalsSource.ProposalByToken(searchStr)
+		if err == nil && proposalInfo.RefID != "" {
+			http.Redirect(w, r, "/proposal/"+proposalInfo.RefID, http.StatusPermanentRedirect)
+			return
+		}
 	}
 
 	message := "The search did not find any matching address, block, transaction or proposal token: " + searchStr
@@ -1557,6 +1564,13 @@ func (exp *explorerUI) Search(w http.ResponseWriter, r *http.Request) {
 // handling without redirecting. Be sure to return after calling StatusPage if
 // this completes the processing of the calling http handler.
 func (exp *explorerUI) StatusPage(w http.ResponseWriter, code, message, additionalInfo string, sType expStatus) {
+	commonPageData := exp.commonData(dummyRequest)
+	if commonPageData == nil {
+		// exp.blockData.GetTip likely failed due to empty DB.
+		http.Error(w, "The database is initializing. Try again later.",
+			http.StatusServiceUnavailable)
+		return
+	}
 	str, err := exp.templates.execTemplateToString("status", struct {
 		*CommonPageData
 		StatusType     expStatus
@@ -1564,7 +1578,7 @@ func (exp *explorerUI) StatusPage(w http.ResponseWriter, code, message, addition
 		Message        string
 		AdditionalInfo string
 	}{
-		CommonPageData: exp.commonData(dummyRequest),
+		CommonPageData: commonPageData,
 		StatusType:     sType,
 		Code:           code,
 		Message:        message,
@@ -1766,6 +1780,13 @@ func (exp *explorerUI) AgendasPage(w http.ResponseWriter, r *http.Request) {
 
 // ProposalPage is the page handler for the "/proposal" path.
 func (exp *explorerUI) ProposalPage(w http.ResponseWriter, r *http.Request) {
+	if exp.proposalsSource == nil {
+		errMsg := "Remove the disable-piparser flag to activate it."
+		log.Errorf("proposal page is disabled. %s", errMsg)
+		exp.StatusPage(w, errMsg, fmt.Sprintf(pageDisabledCode, "/proposals"), "", ExpStatusPageDisabled)
+		return
+	}
+
 	// Attempts to retrieve a proposal refID from the URL path.
 	proposalInfo, err := exp.proposalsSource.ProposalByRefID(getProposalTokenCtx(r))
 	if err != nil {
@@ -1816,6 +1837,13 @@ func (exp *explorerUI) ProposalPage(w http.ResponseWriter, r *http.Request) {
 
 // ProposalsPage is the page handler for the "/proposals" path.
 func (exp *explorerUI) ProposalsPage(w http.ResponseWriter, r *http.Request) {
+	if exp.proposalsSource == nil {
+		errMsg := "Remove the disable-piparser flag to activate it."
+		log.Errorf("proposals page is disabled. %s", errMsg)
+		exp.StatusPage(w, errMsg, fmt.Sprintf(pageDisabledCode, "/proposals"), "", ExpStatusPageDisabled)
+		return
+	}
+
 	rowsCount, err := strconv.ParseUint(r.URL.Query().Get("rows"), 10, 64)
 	if err != nil || rowsCount == 0 {
 		// Number of rows displayed to the by default should be 20.

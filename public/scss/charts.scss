@@ -36,22 +36,11 @@
   color: black;
 }
 
-.tickets {
+.tp-charts {
   width: 100%;
-  height: 300px;
+  height: 25vh;
   margin: 0 auto;
   font-size: 14px;
-}
-
-.ticket_by_types {
-  margin-top: 7%;
-  font-size: 12px;
-}
-
-.doughnutGraph {
-  margin: 0 auto;
-  width: 40%;
-  display: flex;
 }
 
 .modal {
@@ -318,6 +307,7 @@
 .chart-control-wrapper {
   border: 1px solid #e6eaed;
   border-left: 1px solid #e6eaed;
+  font-size: 0.9rem;
 }
 
 .chart-control-label {
@@ -331,6 +321,13 @@
 .chart-control {
   padding: 2px;
   background: #fff;
+  width: max-content;
+}
+
+.chart-form-control {
+  width: 250px;
+  font-size: 0.9rem !important;
+  height: calc(1.5em + 0.5rem + 2px) !important;
 }
 
 .chart-control select,
@@ -418,7 +415,7 @@
   height: 15px;
   width: 15px;
   background-color: #eee;
-  border-radius: 5px;
+  border-radius: 8px;
 }
 
 input ~ .checkmark {
@@ -426,7 +423,7 @@ input ~ .checkmark {
 }
 
 .customcheck input:checked ~ .checkmark {
-  border-radius: 5px;
+  border-radius: 8px;
 }
 
 .customcheck input:checked ~ .received {
@@ -439,6 +436,38 @@ input ~ .checkmark {
 
 .customcheck input:checked ~ .net {
   background-color: #ff0090;
+}
+
+.customcheck input:checked ~ .tickets-price {
+  background-color: #2970ff;
+}
+
+body.darkBG .customcheck input:checked ~ .tickets-price {
+  background-color: #2dd8a3;
+}
+
+.customcheck input:checked ~ .tickets-bought {
+  background-color: #066;
+}
+
+body.darkBG .customcheck input:checked ~ .tickets-bought {
+  background-color: #2970ff;
+}
+
+#chart .dygraph-ylabel {
+  color: #2970ff;
+}
+
+body.darkBG #chart .dygraph-ylabel {
+  color: #2dd8a3;
+}
+
+#chart .dygraph-y2label {
+  color: #066;
+}
+
+body.darkBG #chart .dygraph-y2label {
+  color: #2970ff;
 }
 
 .checkmark::after {
@@ -586,7 +615,7 @@ body.darkBG {
 }
 
 .proposal-chart-align {
-  height: 20vh !important;
+  height: 23vh !important;
   margin: 0 auto 0 auto;
   width: 70%;
 }
@@ -594,4 +623,8 @@ body.darkBG {
 .proposal-charts-align {
   margin: auto;
   height: inherit;
+}
+
+.tp-outputs-align {
+  width: inherit;
 }

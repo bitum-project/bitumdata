@@ -99,7 +99,7 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 						message, err := json.MarshalIndent(tx, "", "    ")
 						if err != nil {
 							log.Warn("Invalid JSON message: ", err)
-							webData.Message = "Error: Could not encode JSON message"
+							webData.Message = errMsgJSONEncode
 							break
 						}
 						webData.Message = string(message)
@@ -140,7 +140,7 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 
 					if err != nil {
 						log.Warn("Invalid JSON message: ", err)
-						webData.Message = "Error: Could not encode JSON message"
+						webData.Message = errMsgJSONEncode
 						break
 					}
 					webData.Message = string(msg)
@@ -159,7 +159,7 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 
 					if err != nil {
 						log.Warn("Invalid JSON message: ", err)
-						webData.Message = "Error: Could not encode JSON message"
+						webData.Message = errMsgJSONEncode
 						break
 					}
 					webData.Message = string(msg)
@@ -170,7 +170,7 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 					// Chart height is returned since the cache may be stale,
 					// although it is automatically updated by the first caller
 					// who requests data from a stale cache.
-					timeChart, priceChart, donutChart, chartHeight, err :=
+					timeChart, priceChart, outputsChart, chartHeight, err :=
 						exp.explorerSource.TicketPoolVisualization(interval)
 					if dbtypes.IsTimeoutErr(err) {
 						log.Warnf("TicketPoolVisualization DB timeout: %v", err)
@@ -203,17 +203,17 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 					inv.RUnlock()
 
 					data := &apitypes.TicketPoolChartsData{
-						ChartHeight: uint64(chartHeight),
-						TimeChart:   timeChart,
-						PriceChart:  priceChart,
-						DonutChart:  donutChart,
-						Mempool:     mp,
+						ChartHeight:  uint64(chartHeight),
+						TimeChart:    timeChart,
+						PriceChart:   priceChart,
+						OutputsChart: outputsChart,
+						Mempool:      mp,
 					}
 
 					msg, err := json.Marshal(data)
 					if err != nil {
 						log.Warn("Invalid JSON message: ", err)
-						webData.Message = "Error: Could not encode JSON message"
+						webData.Message = errMsgJSONEncode
 						break
 					}
 					webData.Message = string(msg)

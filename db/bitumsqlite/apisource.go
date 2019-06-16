@@ -31,6 +31,8 @@ import (
 )
 
 const (
+	// MaxAddressRows is an upper limit on the number of rows that may be
+	// requested with the searchrawtransactions RPC.
 	MaxAddressRows int64 = 1000
 )
 
@@ -45,12 +47,12 @@ type WiredDB struct {
 	waitChan chan chainhash.Hash
 }
 
-func newWiredDB(DB *DB, stakeDB *stakedb.StakeDatabase, statusC chan uint32, cl *rpcclient.Client, p *chaincfg.Params) *WiredDB {
+func newWiredDB(db *DB, stakeDB *stakedb.StakeDatabase, cl *rpcclient.Client, p *chaincfg.Params) *WiredDB {
 	// Initialize the block summary cache.
-	DB.BlockCache = apitypes.NewAPICache(1e4)
+	db.BlockCache = apitypes.NewAPICache(1e4)
 
 	return &WiredDB{
-		DBDataSaver: &DBDataSaver{DB, statusC},
+		DBDataSaver: NewDBDataSaver(db),
 		MPC:         new(mempool.MempoolDataCache),
 		client:      cl,
 		params:      p,
@@ -61,7 +63,7 @@ func newWiredDB(DB *DB, stakeDB *stakedb.StakeDatabase, statusC chan uint32, cl 
 // NewWiredDB creates a new WiredDB from a *sql.DB, a node client, network
 // parameters, and a status update channel. It calls bitumsqlite.NewDB to create a
 // new DB that wrapps the sql.DB.
-func NewWiredDB(db *sql.DB, stakeDB *stakedb.StakeDatabase, statusC chan uint32, cl *rpcclient.Client,
+func NewWiredDB(db *sql.DB, stakeDB *stakedb.StakeDatabase, cl *rpcclient.Client,
 	p *chaincfg.Params, shutdown func()) (*WiredDB, error) {
 	// Create the sqlite.DB
 	DB, err := NewDB(db, shutdown)
@@ -70,19 +72,19 @@ func NewWiredDB(db *sql.DB, stakeDB *stakedb.StakeDatabase, statusC chan uint32,
 	}
 
 	// Create the WiredDB.
-	return newWiredDB(DB, stakeDB, statusC, cl, p), nil
+	return newWiredDB(DB, stakeDB, cl, p), nil
 }
 
 // InitWiredDB creates a new WiredDB from a file containing the data for a
 // sql.DB. The other parameters are same as those for NewWiredDB.
-func InitWiredDB(dbInfo *DBInfo, stakeDB *stakedb.StakeDatabase, statusC chan uint32, cl *rpcclient.Client,
+func InitWiredDB(dbInfo *DBInfo, stakeDB *stakedb.StakeDatabase, cl *rpcclient.Client,
 	p *chaincfg.Params, shutdown func()) (*WiredDB, error) {
 	db, err := InitDB(dbInfo, shutdown)
 	if err != nil {
 		return nil, err
 	}
 
-	return newWiredDB(db, stakeDB, statusC, cl, p), nil
+	return newWiredDB(db, stakeDB, cl, p), nil
 }
 
 func (db *WiredDB) EnableCache() {
@@ -464,7 +466,8 @@ func (db *WiredDB) GetHeader(idx int) *bitumjson.GetBlockHeaderVerboseResult {
 }
 
 func (db *WiredDB) GetBlockVerbose(idx int, verboseTx bool) *bitumjson.GetBlockVerboseResult {
-	return rpcutils.GetBlockVerbose(db.client, int64(idx), verboseTx)
+	block := rpcutils.GetBlockVerbose(db.client, int64(idx), verboseTx)
+	return block
 }
 
 func (db *WiredDB) GetBlockVerboseByHash(hash string, verboseTx bool) *bitumjson.GetBlockVerboseResult {
@@ -608,13 +611,14 @@ func (db *WiredDB) GetAllTxOut(txid *chainhash.Hash) []*apitypes.TxOut {
 // GetRawTransactionWithPrevOutAddresses looks up the previous outpoints for a
 // transaction and extracts a slice of addresses encoded by the pkScript for
 // each previous outpoint consumed by the transaction.
-func (db *WiredDB) GetRawTransactionWithPrevOutAddresses(txid *chainhash.Hash) (*apitypes.Tx, [][]string) {
+func (db *WiredDB) GetRawTransactionWithPrevOutAddresses(txid *chainhash.Hash) (*apitypes.Tx, [][]string, []int64) {
 	tx, _ := db.getRawTransaction(txid)
 	if tx == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	prevOutAddresses := make([][]string, len(tx.Vin))
+	amounts := make([]int64, len(tx.Vin))
 
 	for i := range tx.Vin {
 		vin := &tx.Vin[i]
@@ -624,14 +628,16 @@ func (db *WiredDB) GetRawTransactionWithPrevOutAddresses(txid *chainhash.Hash) (
 			continue
 		}
 		var err error
-		prevOutAddresses[i], err = txhelpers.OutPointAddressesFromString(
+		var amt bitumutil.Amount
+		prevOutAddresses[i], amt, err = txhelpers.OutPointAddressesFromString(
 			vin.Txid, vin.Vout, vin.Tree, db.client, db.params)
 		if err != nil {
 			log.Warnf("failed to get outpoint address from txid: %v", err)
 		}
+		amounts[i] = int64(amt)
 	}
 
-	return tx, prevOutAddresses
+	return tx, prevOutAddresses, amounts
 }
 
 func (db *WiredDB) GetRawTransaction(txid *chainhash.Hash) *apitypes.Tx {
@@ -1029,7 +1035,7 @@ func (db *WiredDB) GetMempoolSSTxDetails(N int) *apitypes.MempoolTicketDetails {
 	return &mpTicketDetails
 }
 
-// GetMempoolPriceCountTime retreives from mempool: the ticket price, the number
+// GetMempoolPriceCountTime retrieves from mempool: the ticket price, the number
 // of tickets in mempool, the time of the first ticket.
 func (db *WiredDB) GetMempoolPriceCountTime() *apitypes.PriceCountTime {
 	return db.MPC.GetTicketPriceCountTime(int(db.params.MaxFreshStakePerBlock))
@@ -1511,9 +1517,9 @@ func (db *WiredDB) GetExplorerTx(txid string) *exptypes.TxInfo {
 	tx.Vin = inputs
 
 	if tx.Vin[0].IsCoinBase() {
-		tx.Type = "Coinbase"
+		tx.Type = exptypes.CoinbaseTypeStr
 	}
-	if tx.Type == "Coinbase" {
+	if tx.Type == exptypes.CoinbaseTypeStr {
 		if tx.Confirmations < int64(db.params.CoinbaseMaturity) {
 			tx.Mature = "False"
 		} else {

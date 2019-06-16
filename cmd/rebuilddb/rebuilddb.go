@@ -96,7 +96,7 @@ func mainCore() int {
 
 	// Sqlite output
 	dbInfo := bitumsqlite.DBInfo{FileName: cfg.DBFileName}
-	sqliteDB, err := bitumsqlite.InitWiredDB(&dbInfo, stakeDB, nil, client,
+	sqliteDB, err := bitumsqlite.InitWiredDB(&dbInfo, stakeDB, client,
 		activeChain, func() {})
 	if err != nil {
 		log.Errorf("Unable to initialize SQLite database: %v", err)

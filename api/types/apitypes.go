@@ -460,6 +460,29 @@ func (s *Status) API() APIStatus {
 	}
 }
 
+// Happy describes just how happy bitumdata is.
+type Happy struct {
+	Happy           bool  `json:"happy"`
+	APIReady        bool  `json:"api_ready"`
+	TipAge          int64 `json:"tip_age"`
+	NodeConnections int64 `json:"node_connections"`
+}
+
+// Happy indicates how bitumdata is or isn't happy.
+func (s *Status) Happy() Happy {
+	s.RLock()
+	blockAge := time.Since(time.Unix(s.dbLastBlockTime, 0))
+	h := Happy{
+		APIReady:        s.ready,
+		TipAge:          int64(blockAge.Seconds()),
+		NodeConnections: s.nodeConnections,
+	}
+	s.RUnlock()
+
+	h.Happy = h.APIReady && blockAge < 90*time.Minute && h.NodeConnections > 0
+	return h
+}
+
 // Height is the last known node height.
 func (s *Status) Height() uint32 {
 	s.RLock()
@@ -471,37 +494,56 @@ func (s *Status) Height() uint32 {
 // if Status.height is the same as Status.dbHeight.
 func (s *Status) SetHeight(height uint32) {
 	s.Lock()
-	defer s.Unlock()
-	s.ready = height == s.dbHeight
+	s.ready = height == s.dbHeight && s.nodeConnections > 0
 	s.height = height
+	s.Unlock()
 }
 
-// SetHeightAndConnections simultaneously sets the node height and node
-// connection count. Status.ready is set to true if the height and dbHeight are
-// the same.
-func (s *Status) SetHeightAndConnections(height uint32, conns int64) {
+// DBHeight is the block most recently stored in the DB.
+func (s *Status) DBHeight() uint32 {
+	s.RLock()
+	defer s.RUnlock()
+	return s.dbHeight
+}
+
+// NodeConnections gets the number of node peer connections.
+func (s *Status) NodeConnections() int64 {
+	s.RLock()
+	defer s.RUnlock()
+	return s.nodeConnections
+}
+
+// SetConnections sets the node connection count.
+func (s *Status) SetConnections(conns int64) {
 	s.Lock()
-	defer s.Unlock()
 	s.nodeConnections = conns
-	s.ready = height == s.dbHeight
-	s.height = height
+	s.ready = s.ready && s.nodeConnections > 0
+	s.Unlock()
 }
 
 // SetReady sets the ready state.
 func (s *Status) SetReady(ready bool) {
 	s.Lock()
-	defer s.Unlock()
 	s.ready = ready
+	s.Unlock()
+}
+
+// Ready checks the ready state.
+func (s *Status) Ready() bool {
+	s.Lock()
+	defer s.Unlock()
+	return s.ready
 }
 
 // DBUpdate updates both the height and time of the best DB block. Status.ready
-// is set to true if Status.height is the same as Status.dbHeight.
+// is set to true if Status.height is the same as Status.dbHeight and the node
+// has connections.
 func (s *Status) DBUpdate(height uint32, blockTime int64) {
 	s.Lock()
-	defer s.Unlock()
 	s.dbHeight = height
 	s.dbLastBlockTime = blockTime
-	s.ready = s.dbHeight == height
+	s.ready = s.dbHeight == s.height
+	s.Unlock()
 }
 
 // CoinSupply models the coin supply at a certain best block.
@@ -692,11 +734,11 @@ type TinyBlock struct {
 // TicketPoolChartsData is for data used to display ticket pool statistics at
 // /ticketpool.
 type TicketPoolChartsData struct {
-	ChartHeight uint64                   `json:"height"`
-	TimeChart   *dbtypes.PoolTicketsData `json:"time_chart"`
-	PriceChart  *dbtypes.PoolTicketsData `json:"price_chart"`
-	DonutChart  *dbtypes.PoolTicketsData `json:"donut_chart"`
-	Mempool     *PriceCountTime          `json:"mempool"`
+	ChartHeight  uint64                   `json:"height"`
+	TimeChart    *dbtypes.PoolTicketsData `json:"time_chart"`
+	PriceChart   *dbtypes.PoolTicketsData `json:"price_chart"`
+	OutputsChart *dbtypes.PoolTicketsData `json:"outputs_chart"`
+	Mempool      *PriceCountTime          `json:"mempool"`
 }
 
 // PowerlessTicket is the purchase block height and value of a missed or expired

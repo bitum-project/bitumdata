@@ -25,6 +25,8 @@ const (
 	bufferTickerInterval = 5
 	newTxBufferSize      = 5
 	clientSignalSize     = 5
+
+	errMsgJSONEncode = "Error: Could not encode JSON message"
 )
 
 // Type aliases for the different HubSignals.
@@ -81,7 +83,6 @@ type client struct {
 	newTxs []*types.MempoolTx
 }
 
-type hubSignal = pstypes.HubSignal
 type hubMessage = pstypes.HubMessage
 type hubSpoke chan hubMessage
 type exchangeChannel chan *WebsocketExchangeUpdate
@@ -149,8 +150,8 @@ func (wsh *WebsocketHub) unregisterClient(c *hubSpoke) {
 	delete(wsh.clients, c)
 	wsh.setNumClients(len(wsh.clients))
 
-	// Close the channel, but make sure the client didn't do it
-	safeClose(*c)
+	// Close the channel.
+	close(*c)
 }
 
 // unregisterAllClients should only be called from the loop in run() or when no
@@ -180,10 +181,7 @@ func (wsh *WebsocketHub) pingClients() chan<- struct{} {
 			select {
 			case <-ticker.C:
 				wsh.HubRelay <- pstypes.HubMessage{Signal: sigPingAndUserCount}
-			case _, ok := <-stopPing:
-				if !ok {
-					log.Errorf("Do not send on stopPing channel, only close it.")
-				}
+			case <-stopPing:
 				return
 			}
 		}
@@ -192,22 +190,12 @@ func (wsh *WebsocketHub) pingClients() chan<- struct{} {
 	return stopPing
 }
 
-func safeClose(cc hubSpoke) {
-	select {
-	case _, ok := <-cc:
-		if !ok {
-			log.Debug("Channel already closed!")
-			return
-		}
-	default:
-	}
-	close(cc)
-}
-
-// Stop kills the run() loop and unregisteres all clients (connections).
+// Stop kills the run() loop and unregisters all clients (connections).
 func (wsh *WebsocketHub) Stop() {
-	// end the run() loop, allowing in progress operations to complete
-	wsh.quitWSHandler <- struct{}{}
+	// End the run() loop, allowing in-progress operations to complete.
+	close(wsh.quitWSHandler)
+	// Do not close HubRelay since there are multiple senders; run() is the
+	// receiver.
 }
 
 func (wsh *WebsocketHub) run() {
@@ -251,7 +239,7 @@ func (wsh *WebsocketHub) run() {
 					continue
 				}
 				log.Tracef("Received new tx %s", newtx.Hash)
-				wsh.MaybeSendTxns(newtx)
+				wsh.maybeSendTxns(newtx)
 			case sigAddressTx, sigSubscribe, sigUnsubscribe:
 				// explorer's WebsocketHub does not have address subscriptions,
 				// so do not relay address signals to any clients.
@@ -285,15 +273,12 @@ func (wsh *WebsocketHub) run() {
 		case c := <-wsh.Unregister:
 			wsh.unregisterClient(c)
 
-		case _, ok := <-wsh.quitWSHandler:
-			if !ok {
-				log.Error("close channel already closed. This should not happen.")
-				return
-			}
-			close(wsh.quitWSHandler)
+		case <-wsh.quitWSHandler:
 
 			// End the buffer interval send loop.
 			wsh.bufferTickerChan <- tickerSigStop
+
+			return
 
 		case <-wsh.sendBufferChan:
 			wsh.bufferMtx.Lock()
@@ -340,10 +325,10 @@ func (wsh *WebsocketHub) run() {
 	} // for {
 }
 
-// MaybeSendTxns adds a mempool transaction to the client broadcast buffer. If
+// maybeSendTxns adds a mempool transaction to the client broadcast buffer. If
 // the buffer is at capacity, a goroutine is launched to signal for the
 // transactions to be sent to the clients.
-func (wsh *WebsocketHub) MaybeSendTxns(tx *types.MempoolTx) {
+func (wsh *WebsocketHub) maybeSendTxns(tx *types.MempoolTx) {
 	if wsh.addTxToBuffer(tx) {
 		// This is called from the event loop, so these sends channel may not be
 		// blocking.

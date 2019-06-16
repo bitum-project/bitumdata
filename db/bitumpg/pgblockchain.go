@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +42,19 @@ var (
 	zeroHash            = chainhash.Hash{}
 	zeroHashStringBytes = []byte(chainhash.Hash{}.String())
 )
+
+type retryError struct{}
+
+// Error implements Stringer for retryError.
+func (s retryError) Error() string {
+	return "retry"
+}
+
+// IsRetryError checks if an error is a retryError type.
+func IsRetryError(err error) bool {
+	_, isRetryErr := err.(retryError)
+	return isRetryErr
+}
 
 // storedAgendas holds the current state of agenda data already in the db.
 // This helps track changes in the lockedIn and activated heights when they
@@ -231,6 +243,7 @@ type ChainDB struct {
 	deployments        *ChainDeployments
 	piparser           ProposalsFetcher
 	proposalsSync      lastSync
+	cockroach          bool
 }
 
 // ChainDeployments is mutex-protected blockchain deployment data.
@@ -293,7 +306,7 @@ func NewChainDBRPC(chaindb *ChainDB, cl *rpcclient.Client) (*ChainDBRPC, error) 
 // SyncChainDBAsync calls (*ChainDB).SyncChainDBAsync after a nil pointer check
 // on the ChainDBRPC receiver.
 func (pgb *ChainDBRPC) SyncChainDBAsync(ctx context.Context, res chan dbtypes.SyncResult,
-	client rpcutils.MasterBlockGetter, updateAllAddresses, updateAllVotes, newIndexes bool,
+	client rpcutils.MasterBlockGetter, updateAllAddresses, newIndexes bool,
 	updateExplorer chan *chainhash.Hash, barLoad chan *dbtypes.ProgressBarLoad) {
 	// Allowing db to be nil simplifies logic in caller.
 	if pgb == nil {
@@ -304,7 +317,7 @@ func (pgb *ChainDBRPC) SyncChainDBAsync(ctx context.Context, res chan dbtypes.Sy
 		return
 	}
 	pgb.ChainDB.SyncChainDBAsync(ctx, res, client, updateAllAddresses,
-		updateAllVotes, newIndexes, updateExplorer, barLoad)
+		newIndexes, updateExplorer, barLoad)
 }
 
 // Store satisfies BlockDataSaver. Blocks stored this way are considered valid
@@ -510,8 +523,10 @@ func NewChainDBWithCancel(ctx context.Context, dbi *DBInfo, params *chaincfg.Par
 	}
 	log.Info(pgVersion)
 
+	cockroach := strings.Contains(pgVersion, "CockroachDB")
+
 	// Optionally logs the PostgreSQL configuration.
-	if !hidePGConfig {
+	if !cockroach && !hidePGConfig {
 		perfSettings, err := RetrieveSysSettingsPerformance(db)
 		if err != nil {
 			return nil, err
@@ -526,23 +541,45 @@ func NewChainDBWithCancel(ctx context.Context, dbi *DBInfo, params *chaincfg.Par
 	}
 
 	// Check the synchronous_commit setting.
-	syncCommit, err := RetrieveSysSettingSyncCommit(db)
-	if err != nil {
-		return nil, err
-	}
-	if syncCommit != "off" {
-		log.Warnf(`PERFORMANCE ISSUE! The synchronous_commit setting is "%s". `+
-			`Changing it to "off".`, syncCommit)
-		// Turn off synchronous_commit.
-		if err = SetSynchronousCommit(db, "off"); err != nil {
-			return nil, fmt.Errorf("failed to set synchronous_commit: %v", err)
-		}
-		// Verify that the setting was changed.
-		if syncCommit, err = RetrieveSysSettingSyncCommit(db); err != nil {
+	if !cockroach {
+		syncCommit, err := RetrieveSysSettingSyncCommit(db)
+		if err != nil {
 			return nil, err
 		}
 		if syncCommit != "off" {
-			log.Errorf(`Failed to set synchronous_commit="off". Check PostgreSQL user permissions.`)
+			log.Warnf(`PERFORMANCE ISSUE! The synchronous_commit setting is "%s". `+
+				`Changing it to "off".`, syncCommit)
+			// Turn off synchronous_commit.
+			if err = SetSynchronousCommit(db, "off"); err != nil {
+				return nil, fmt.Errorf("failed to set synchronous_commit: %v", err)
+			}
+			// Verify that the setting was changed.
+			if syncCommit, err = RetrieveSysSettingSyncCommit(db); err != nil {
+				return nil, err
+			}
+			if syncCommit != "off" {
+				log.Errorf(`Failed to set synchronous_commit="off". Check PostgreSQL user permissions.`)
+			}
+		}
+	} else {
+		// Force CockroachDB to use a real sequence when creating a table with a
+		// SERIAL column.
+		_, err = db.Exec("SET experimental_serial_normalization = sql_sequence;")
+		if err != nil {
+			return nil, fmt.Errorf("failed to set experimental_serial_normalization: %v", err)
+		}
+
+		// Prevent too many versions of nextval() during bulk inserts using
+		// autoincrement of row primary key by lowering garbage the collection
+		// interval (from 25 hours!).
+		crdbGCInterval := 1200 // 20 minutes between garbage collections
+		_, err = db.Exec(fmt.Sprintf(`ALTER DATABASE %s CONFIGURE ZONE USING gc.ttlseconds=$1;`,
+			dbi.DBName), crdbGCInterval)
+		if err != nil {
+			// In secure mode, the user may need permissions to modify zones. e.g.
+			// GRANT UPDATE ON TABLE bitumdata_mainnet.crdb_internal.zones TO bitumdata_user;
+			return nil, fmt.Errorf(`failed to set gc.ttlseconds=%d for database "%s": %v`,
+				crdbGCInterval, dbi.DBName, err)
 		}
 	}
 
@@ -740,6 +777,7 @@ func NewChainDBWithCancel(ctx context.Context, dbi *DBInfo, params *chaincfg.Par
 		utxoCache:          newUtxoStore(5e4),
 		deployments:        new(ChainDeployments),
 		piparser:           parser,
+		cockroach:          cockroach,
 	}
 
 	// If loading a DB with the legacy versioning system, fully upgrade prior to
@@ -831,22 +869,18 @@ var (
 // meta table does not exist, a metaNotFoundErr error is returned to indicate
 // that the legacy table versioning system is in use.
 func versionCheck(db *sql.DB) (*DatabaseVersion, CompatAction, error) {
-	// Check for the regular data tables to detect an empty database.
-	for tableName := range createTableStatements {
-		if tableName == "meta" {
-			continue
-		}
-		exists, err := TableExists(db, tableName)
-		if err != nil {
-			return nil, Unknown, err
-		}
-		if !exists {
-			return nil, Unknown, tablesNotFoundErr
-		}
+	// Detect an empty database, only checking for the "blocks" table since some
+	// of the tables are created by schema upgrades (e.g. proposal_votes).
+	exists, err := TableExists(db, "blocks")
+	if err != nil {
+		return nil, Unknown, err
+	}
+	if !exists {
+		return nil, Unknown, tablesNotFoundErr
 	}
 
 	// The meta table stores the database schema version.
-	exists, err := TableExists(db, "meta")
+	exists, err = TableExists(db, "meta")
 	if err != nil {
 		return nil, Unknown, err
 	}
@@ -961,6 +995,12 @@ func (pgb *ChainDB) RegisterCharts(charts *cache.ChartData) {
 		Fetcher:  pgb.windowStats,
 		Appender: appendWindowStats,
 	})
+
+	charts.AddUpdater(cache.ChartUpdater{
+		Tag:      "missed votes stats",
+		Fetcher:  pgb.missedVotesStats,
+		Appender: appendMissedVotes,
+	})
 }
 
 // TransactionBlocks retrieves the blocks in which the specified transaction
@@ -989,9 +1029,34 @@ func (pgb *ChainDB) TransactionBlocks(txHash string) ([]*dbtypes.BlockStatus, []
 	return blocks, inds, nil
 }
 
-// HeightDB queries the DB for the best block height. When the tables are empty,
-// the returned height will be -1.
+// HeightDB retrieves the best block height according to the meta table.
 func (pgb *ChainDB) HeightDB() (int64, error) {
+	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
+	defer cancel()
+	_, height, err := DBBestBlock(ctx, pgb.db)
+	return height, pgb.replaceCancelError(err)
+}
+
+// HashDB retrieves the best block hash according to the meta table.
+func (pgb *ChainDB) HashDB() (string, error) {
+	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
+	defer cancel()
+	hash, _, err := DBBestBlock(ctx, pgb.db)
+	return hash, pgb.replaceCancelError(err)
+}
+
+// HeightHashDB retrieves the best block height and hash according to the meta
+// table.
+func (pgb *ChainDB) HeightHashDB() (int64, string, error) {
+	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
+	defer cancel()
+	hash, height, err := DBBestBlock(ctx, pgb.db)
+	return height, hash, pgb.replaceCancelError(err)
+}
+
+// HeightDBLegacy queries the blocks table for the best block height. When the
+// tables are empty, the returned height will be -1.
+func (pgb *ChainDB) HeightDBLegacy() (int64, error) {
 	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
 	defer cancel()
 	bestHeight, _, _, err := RetrieveBestBlockHeight(ctx, pgb.db)
@@ -999,20 +1064,20 @@ func (pgb *ChainDB) HeightDB() (int64, error) {
 	if err == sql.ErrNoRows {
 		height = -1
 	}
-	// DO NOT change this to return -1 if err == sql.ErrNoRows.
 	return height, pgb.replaceCancelError(err)
 }
 
-// HashDB queries the DB for the best block's hash.
-func (pgb *ChainDB) HashDB() (string, error) {
+// HashDBLegacy queries the blocks table for the best block's hash.
+func (pgb *ChainDB) HashDBLegacy() (string, error) {
 	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
 	defer cancel()
 	_, bestHash, _, err := RetrieveBestBlockHeight(ctx, pgb.db)
 	return bestHash, pgb.replaceCancelError(err)
 }
 
-// HeightHashDB queries the DB for the best block's height and hash.
-func (pgb *ChainDB) HeightHashDB() (uint64, string, error) {
+// HeightHashDBLegacy queries the blocks table for the best block's height and
+// hash.
+func (pgb *ChainDB) HeightHashDBLegacy() (uint64, string, error) {
 	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
 	defer cancel()
 	height, hash, _, err := RetrieveBestBlockHeight(ctx, pgb.db)
@@ -1117,9 +1182,9 @@ func (pgb *ChainDB) VotesInBlock(hash string) (int16, error) {
 // proposalsUpdateHandler runs in the background asynchronous to retrieve the
 // politeia proposal updates that the piparser tool signaled.
 func (pgb *ChainDB) proposalsUpdateHandler() {
-	// Do not initiate the async update if invalid piparser instance was found.
+	// Do not initiate the async update if invalid or disabled piparser instance was found.
 	if pgb.piparser == nil {
-		log.Debug("invalid piparser instance was found: async update stopped")
+		log.Error("invalid or disabled piparser instance found: proposals async update stopped")
 		return
 	}
 
@@ -1127,7 +1192,6 @@ func (pgb *ChainDB) proposalsUpdateHandler() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Errorf("recovered from piparser panic in proposalsUpdateHandler: %v", r)
-				log.Errorf(string(debug.Stack()))
 				select {
 				case <-time.NewTimer(time.Minute).C:
 					log.Infof("attempting to restart proposalsUpdateHandler")
@@ -1576,11 +1640,11 @@ func (pgb *ChainDB) TicketPoolVisualization(interval dbtypes.TimeBasedGrouping) 
 	if heightSeen < 0 {
 		return nil, nil, nil, -1, fmt.Errorf("no charts data available")
 	}
-	timeChart, priceChart, donutCharts, height, intervalFound, stale :=
+	timeChart, priceChart, outputsChart, height, intervalFound, stale :=
 		TicketPoolData(interval, heightSeen)
 	if intervalFound && !stale {
 		// The cache was fresh.
-		return timeChart, priceChart, donutCharts, height, nil
+		return timeChart, priceChart, outputsChart, height, nil
 	}
 
 	// Cache is stale or empty. Attempt to gain updater status.
@@ -1595,7 +1659,7 @@ func (pgb *ChainDB) TicketPoolVisualization(interval dbtypes.TimeBasedGrouping) 
 			defer pgb.tpUpdatePermission[interval].Unlock()
 			// Try again to pull it from cache now that the update is completed.
 			heightSeen = pgb.Height()
-			timeChart, priceChart, donutCharts, height, intervalFound, stale =
+			timeChart, priceChart, outputsChart, height, intervalFound, stale =
 				TicketPoolData(interval, heightSeen)
 			// We waited for the updater of this interval, so it should be found
 			// at this point. If not, this is an error.
@@ -1609,23 +1673,23 @@ func (pgb *ChainDB) TicketPoolVisualization(interval dbtypes.TimeBasedGrouping) 
 		}
 		// else return the stale data instead of waiting.
 
-		return timeChart, priceChart, donutCharts, height, nil
+		return timeChart, priceChart, outputsChart, height, nil
 	}
 	// This goroutine is now the cache updater.
 	defer pgb.tpUpdatePermission[interval].Unlock()
 
 	// Retrieve chart data for best block in DB.
 	var err error
-	timeChart, priceChart, donutCharts, height, err = pgb.ticketPoolVisualization(interval)
+	timeChart, priceChart, outputsChart, height, err = pgb.ticketPoolVisualization(interval)
 	if err != nil {
 		log.Errorf("Failed to fetch ticket pool data: %v", err)
 		return nil, nil, nil, 0, err
 	}
 
 	// Update the cache with the new ticket pool data.
-	UpdateTicketPoolData(interval, timeChart, priceChart, donutCharts, height)
+	UpdateTicketPoolData(interval, timeChart, priceChart, outputsChart, height)
 
-	return timeChart, priceChart, donutCharts, height, nil
+	return timeChart, priceChart, outputsChart, height, nil
 }
 
 // ticketPoolVisualization fetches the following ticketpool data: tickets
@@ -1750,7 +1814,8 @@ func (pgb *ChainDB) FreshenAddressCaches(lazyProjectFund bool, expireAddresses [
 	// Update project fund data.
 	updateFundData := func() error {
 		log.Infof("Pre-fetching project fund data at height %d...", pgb.Height())
-		if err := pgb.updateProjectFundCache(); err != nil && err.Error() != "retry" {
+		err := pgb.updateProjectFundCache()
+		if err != nil && !IsRetryError(err) {
 			err = pgb.replaceCancelError(err)
 			return fmt.Errorf("Failed to update project fund data: %v", err)
 		}
@@ -1812,9 +1877,9 @@ func (pgb *ChainDB) AddressBalance(address string) (bal *dbtypes.AddressBalance,
 	if busy {
 		// Let others get the wait channel while we wait.
 		// To return stale cache data if it is available:
-		// utxos, _ := pgb.AddressCache.UTXOs(address)
-		// if utxos != nil {
-		// 	return utxos, nil
+		// bal, _ := pgb.AddressCache.Balance(address)
+		// if bal != nil {
+		// 	return bal, nil
 		// }
 		<-wait
 
@@ -1844,13 +1909,14 @@ func (pgb *ChainDB) AddressBalance(address string) (bal *dbtypes.AddressBalance,
 
 // updateAddressRows updates address rows, or waits for them to update by an
 // ongoing query. On completion, the cache should be ready, although it must be
-// checked again.
+// checked again. The returned []*dbtypes.AddressRow contains ALL non-merged
+// address transaction rows that were stored in the cache.
 func (pgb *ChainDB) updateAddressRows(address string) (rows []*dbtypes.AddressRow, cacheUpdated bool, err error) {
 	busy, wait, done := pgb.CacheLocks.rows.TryLock(address)
 	if busy {
 		// Just wait until the updater is finished.
 		<-wait
-		err = fmt.Errorf("retry")
+		err = retryError{}
 		return
 	}
 
@@ -1858,6 +1924,9 @@ func (pgb *ChainDB) updateAddressRows(address string) (rows []*dbtypes.AddressRo
 	// and/or cache update is completed, broadcast to any waiters that the coast
 	// is clear.
 	defer done()
+
+	// Prior to performing the query, clear the old rows to save memory.
+	pgb.AddressCache.ClearRows(address)
 
 	hash, height := pgb.BestBlock()
 	blockID := cache.NewBlockID(hash, height)
@@ -1875,22 +1944,29 @@ func (pgb *ChainDB) updateAddressRows(address string) (rows []*dbtypes.AddressRo
 
 // AddressRowsMerged gets the merged address rows either from cache or via DB
 // query.
-func (pgb *ChainDB) AddressRowsMerged(address string) ([]dbtypes.AddressRowMerged, error) {
+func (pgb *ChainDB) AddressRowsMerged(address string) ([]*dbtypes.AddressRowMerged, error) {
 	// Try the address cache.
 	hash := pgb.BestBlockHash()
 	rowsCompact, validBlock := pgb.AddressCache.Rows(address)
 	cacheCurrent := validBlock != nil && validBlock.Hash == *hash && rowsCompact != nil
 	if cacheCurrent {
-		log.Tracef("AddressRows: rows cache HIT for %s.", address)
+		log.Tracef("AddressRowsMerged: rows cache HIT for %s.", address)
 		return dbtypes.MergeRowsCompact(rowsCompact), nil
 	}
 
-	log.Tracef("AddressRows: rows cache MISS for %s.", address)
+	// Make the pointed to AddressRowMerged structs eligible for garbage
+	// collection. pgb.updateAddressRows sets a new AddressRowMerged slice
+	// retrieved from the database, so we do not want to hang on to a copy of
+	// the old data.
+	//nolint:ineffassign
+	rowsCompact = nil
+
+	log.Tracef("AddressRowsMerged: rows cache MISS for %s.", address)
 
 	// Update or wait for an update to the cached AddressRows.
 	rows, _, err := pgb.updateAddressRows(address)
 	if err != nil {
-		if err.Error() == "retry" {
+		if IsRetryError(err) {
 			// Try again, starting with cache.
 			return pgb.AddressRowsMerged(address)
 		}
@@ -1903,22 +1979,29 @@ func (pgb *ChainDB) AddressRowsMerged(address string) ([]dbtypes.AddressRowMerge
 
 // AddressRowsCompact gets non-merged address rows either from cache or via DB
 // query.
-func (pgb *ChainDB) AddressRowsCompact(address string) ([]dbtypes.AddressRowCompact, error) {
+func (pgb *ChainDB) AddressRowsCompact(address string) ([]*dbtypes.AddressRowCompact, error) {
 	// Try the address cache.
 	hash := pgb.BestBlockHash()
 	rowsCompact, validBlock := pgb.AddressCache.Rows(address)
 	cacheCurrent := validBlock != nil && validBlock.Hash == *hash && rowsCompact != nil
 	if cacheCurrent {
-		log.Tracef("AddressRows: rows cache HIT for %s.", address)
+		log.Tracef("AddressRowsCompact: rows cache HIT for %s.", address)
 		return rowsCompact, nil
 	}
 
-	log.Tracef("AddressRows: rows cache MISS for %s.", address)
+	// Make the pointed to AddressRowCompact structs eligible for garbage
+	// collection. pgb.updateAddressRows sets a new AddressRowCompact slice
+	// retrieved from the database, so we do not want to hang on to a copy of
+	// the old data.
+	//nolint:ineffassign
+	rowsCompact = nil
+
+	log.Tracef("AddressRowsCompact: rows cache MISS for %s.", address)
 
 	// Update or wait for an update to the cached AddressRows.
 	rows, _, err := pgb.updateAddressRows(address)
 	if err != nil {
-		if err.Error() == "retry" {
+		if IsRetryError(err) {
 			// Try again, starting with cache.
 			return pgb.AddressRowsCompact(address)
 		}
@@ -2017,20 +2100,29 @@ func (pgb *ChainDB) AddressHistory(address string, N, offset int64,
 
 	cacheCurrent := validBlock != nil && validBlock.Hash == *hash
 	if !cacheCurrent {
+		//nolint:ineffassign
+		addressRows = nil // allow garbage collection of each AddressRow in cache.
 		log.Debugf("Address rows (view=%s) cache MISS for %s.",
 			txnView.String(), address)
 
-		// Update or wait for an update to the cached AddressRows.
+		// Update or wait for an update to the cached AddressRows, returning ALL
+		// NON-MERGED address transaction rows.
 		addressRows, _, err = pgb.updateAddressRows(address)
-		// See if another caller ran the update, in which case we were just
-		// waiting to avoid a simultaneous query. With luck the cache will be
-		// updated with this data, although it may not be. Try again.
 		if err != nil && err != sql.ErrNoRows {
-			if err.Error() == "retry" {
+			// See if another caller ran the update, in which case we were just
+			// waiting to avoid a simultaneous query. With luck the cache will
+			// be updated with this data, although it may not be. Try again.
+			if IsRetryError(err) {
 				// Try again, starting with cache.
 				return pgb.AddressHistory(address, N, offset, txnView)
 			}
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("failed to updateAddressRows: %v", err)
+		}
+
+		// Select the correct type and range of address rows, merging if needed.
+		addressRows, err = dbtypes.SliceAddressRows(addressRows, int(N), int(offset), txnView)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to SliceAddressRows: %v", err)
 		}
 	}
 	log.Debugf("Address rows (view=%s) cache HIT for %s.",
@@ -2238,6 +2330,7 @@ FUNDING_TX_DUPLICATE_CHECK:
 				FormattedSize: humanize.Bytes(uint64(fundingTx.Tx.SerializeSize())),
 				Total:         txhelpers.TotalOutFromMsgTx(fundingTx.Tx).ToCoin(),
 				ReceivedTotal: bitumutil.Amount(fundingTx.Tx.TxOut[f.Index].Value).ToCoin(),
+				IsFunding:     true,
 			}
 			addrData.Transactions = append(addrData.Transactions, addrTx)
 		}
@@ -2470,7 +2563,7 @@ func MakeCsvAddressRows(rows []*dbtypes.AddressRow) [][]string {
 	return csvRows
 }
 
-func MakeCsvAddressRowsCompact(rows []dbtypes.AddressRowCompact) [][]string {
+func MakeCsvAddressRowsCompact(rows []*dbtypes.AddressRowCompact) [][]string {
 	csvRows := make([][]string, 0, len(rows)+1)
 	csvRows = append(csvRows, []string{"tx_hash", "direction", "io_index",
 		"valid_mainchain", "value", "time_stamp", "tx_type", "matching_tx_hash"})
@@ -2812,13 +2905,19 @@ func (pgb *ChainDB) TxHistoryData(address string, addrChart dbtypes.HistoryChart
 		return
 	}
 
+	// Make the pointed to ChartsData eligible for garbage collection.
+	// pgb.AddressCache.StoreHistoryChart sets a new ChartsData retrieved from
+	// the database, so we do not want to hang on to a copy of the old data.
+	//nolint:ineffassign
+	cd = nil
+
 	busy, wait, done := pgb.CacheLocks.bal.TryLock(address)
 	if busy {
 		// Let others get the wait channel while we wait.
 		// To return stale cache data if it is available:
-		// utxos, _ := pgb.AddressCache.UTXOs(address)
-		// if utxos != nil {
-		// 	return utxos, nil
+		// cd, _ := pgb.AddressCache.HistoryChart(...)
+		// if cd != nil {
+		// 	return cd, nil
 		// }
 		<-wait
 
@@ -2884,6 +2983,20 @@ func (pgb *ChainDB) windowStats(charts *cache.ChartData) (*sql.Rows, func(), err
 	rows, err := retrieveWindowStats(ctx, pgb.db, charts)
 	if err != nil {
 		return nil, cancel, fmt.Errorf("windowStats: %v", pgb.replaceCancelError(err))
+	}
+
+	return rows, cancel, nil
+}
+
+// missedVotesStats fetches the charts data from retrieveMissedVotes.
+// This is the Fetcher half of a pair that make up a cache.ChartUpdater. The
+// Appender half is appendMissedVotes.
+func (pgb *ChainDB) missedVotesStats(charts *cache.ChartData) (*sql.Rows, func(), error) {
+	ctx, cancel := context.WithTimeout(pgb.ctx, pgb.queryTimeout)
+
+	rows, err := retrieveMissedVotes(ctx, pgb.db, charts)
+	if err != nil {
+		return nil, cancel, fmt.Errorf("missedVotesStats: %v", pgb.replaceCancelError(err))
 	}
 
 	return rows, cancel, nil
@@ -3484,7 +3597,6 @@ func (pgb *ChainDB) storeTxns(txns []*dbtypes.Tx, vouts [][]*dbtypes.Vout, vins 
 	var dbTx *sql.Tx
 	dbTx, err = pgb.db.Begin()
 	if err != nil {
-		_ = dbTx.Rollback()
 		err = fmt.Errorf("failed to begin database transaction: %v", err)
 		return
 	}
@@ -3495,7 +3607,7 @@ func (pgb *ChainDB) storeTxns(txns []*dbtypes.Tx, vouts [][]*dbtypes.Vout, vins 
 	voutStmt, err = dbTx.Prepare(internal.MakeVoutInsertStatement(checked, doUpsert))
 	if err != nil {
 		_ = dbTx.Rollback()
-		err = fmt.Errorf("failed to prepare vout insert statment: %v", err)
+		err = fmt.Errorf("failed to prepare vout insert statement: %v", err)
 		return
 	}
 	defer voutStmt.Close()
@@ -3504,7 +3616,7 @@ func (pgb *ChainDB) storeTxns(txns []*dbtypes.Tx, vouts [][]*dbtypes.Vout, vins 
 	vinStmt, err = dbTx.Prepare(internal.MakeVinInsertStatement(checked, doUpsert))
 	if err != nil {
 		_ = dbTx.Rollback()
-		err = fmt.Errorf("failed to prepare vin insert statment: %v", err)
+		err = fmt.Errorf("failed to prepare vin insert statement: %v", err)
 		return
 	}
 	defer vinStmt.Close()
@@ -4140,6 +4252,6 @@ func (pgb *ChainDBRPC) GetChainWork(hash *chainhash.Hash) (string, error) {
 func (pgb *ChainDB) GenesisStamp() int64 {
 	tDef := dbtypes.NewTimeDefFromUNIX(0)
 	// Ignoring error and returning zero time.
-	pgb.db.QueryRowContext(pgb.ctx, internal.SelectGenesisTime).Scan(&tDef)
+	_ = pgb.db.QueryRowContext(pgb.ctx, internal.SelectGenesisTime).Scan(&tDef)
 	return tDef.T.Unix()
 }

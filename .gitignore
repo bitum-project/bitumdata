@@ -8,7 +8,7 @@ debug
 *.cert
 *.key
 bitumdata
-bitumdata*.conf
+bitumdata.conf
 /vendor/
 *.orig
 *.db
@@ -32,6 +32,7 @@ ffldb_stake*/
 testnet/
 .DS_Store
 testdata/
+dev/datadir/
 \.project
 test-data-repo
 bitumdata-testdata-gitlfs
@@ -53,5 +54,4 @@ testutil/dbconfig/test.data
 pubsub/democlient/democlient
 bitumrates/rateserver/rateserver
 bitumrates/rateserver/logs/
-*.sql
 *.gob

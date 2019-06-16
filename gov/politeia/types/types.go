@@ -6,7 +6,7 @@ package types
 import piapi "github.com/bitum-project/politeia/politeiawww/api/www/v1"
 
 // ProposalInfo holds the proposal details as document here
-// https://github.combitum-project/politeia/blob/master/politeiawww/api/www/v1/api.md#user-proposals.
+// https://github.com/bitum-project/politeia/blob/master/politeiawww/api/www/v1/api.md#user-proposals.
 // It also holds the votes status details. The ID field is auto incremented by
 // the db.
 type ProposalInfo struct {

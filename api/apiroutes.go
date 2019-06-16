@@ -33,7 +33,6 @@ import (
 	"github.com/bitum-project/bitumdata/gov/agendas"
 	m "github.com/bitum-project/bitumdata/middleware"
 	"github.com/bitum-project/bitumdata/txhelpers"
-	notify "github.com/bitum-project/bitumdata/notification"
 	appver "github.com/bitum-project/bitumdata/version"
 )
 
@@ -53,7 +52,7 @@ type DataSourceLite interface {
 	GetRawTransaction(txid *chainhash.Hash) *apitypes.Tx
 	GetTransactionHex(txid *chainhash.Hash) string
 	GetTrimmedTransaction(txid *chainhash.Hash) *apitypes.TrimmedTx
-	GetRawTransactionWithPrevOutAddresses(txid *chainhash.Hash) (*apitypes.Tx, [][]string)
+	GetRawTransactionWithPrevOutAddresses(txid *chainhash.Hash) (*apitypes.Tx, [][]string, []int64)
 	GetVoteInfo(txid *chainhash.Hash) (*apitypes.VoteInfo, error)
 	GetVoteVersionInfo(ver uint32) (*bitumjson.GetVoteInfoResult, error)
 	GetStakeVersions(txHash string, count int32) (*bitumjson.GetStakeVersionsResult, error)
@@ -91,6 +90,7 @@ type DataSourceLite interface {
 	SendRawTransaction(txhex string) (string, error)
 	GetExplorerAddress(address string, count, offset int64) (*dbtypes.AddressInfo, txhelpers.AddressType, txhelpers.AddressError)
 	GetMempoolPriceCountTime() *apitypes.PriceCountTime
+	UpdateChan() chan uint32
 }
 
 // DataSourceAux specifies an interface for advanced data collection using the
@@ -129,20 +129,22 @@ type appContext struct {
 	AgendaDB      *agendas.AgendaDB
 	maxCSVAddrs   int
 	charts        *cache.ChartData
+	isPiDisabled  bool // is piparser disabled
 }
 
 // AppContextConfig is the configuration for the appContext and the only
 // argument to its constructor.
 type AppContextConfig struct {
-	Client            *rpcclient.Client
-	Params            *chaincfg.Params
-	DataSource        DataSourceLite
-	DBSource          DataSourceAux
-	JsonIndent        string
-	XcBot             *exchanges.ExchangeBot
-	AgendasDBInstance *agendas.AgendaDB
-	MaxAddrs          int
-	Charts            *cache.ChartData
+	Client             *rpcclient.Client
+	Params             *chaincfg.Params
+	DataSource         DataSourceLite
+	DBSource           DataSourceAux
+	JsonIndent         string
+	XcBot              *exchanges.ExchangeBot
+	AgendasDBInstance  *agendas.AgendaDB
+	MaxAddrs           int
+	Charts             *cache.ChartData
+	IsPiparserDisabled bool
 }
 
 // NewContext constructs a new appContext from the RPC client, primary and
@@ -168,34 +170,71 @@ func NewContext(cfg *AppContextConfig) *appContext {
 		JSONIndent:    cfg.JsonIndent,
 		maxCSVAddrs:   cfg.MaxAddrs,
 		charts:        cfg.Charts,
+		isPiDisabled:  cfg.IsPiparserDisabled,
 	}
+}
+
+func (c *appContext) updateNodeConnections() error {
+	nodeConnections, err := c.nodeClient.GetConnectionCount()
+	if err != nil {
+		// Assume there arr no connections if RPC had an error.
+		c.Status.SetConnections(0)
+		return fmt.Errorf("failed to get connection count: %v", err)
+	}
+
+	// Before updating connections, get the previous connection count.
+	prevConnections := c.Status.NodeConnections()
+
+	c.Status.SetConnections(nodeConnections)
+	if nodeConnections == 0 {
+		return nil
+	}
+
+	// Detect if the node's peer connections were just restored.
+	if prevConnections != 0 {
+		// Status.ready may be false, but since connections were not lost and
+		// then recovered, it is not our job to check other readiness factors.
+		return nil
+	}
+
+	// Check the reconnected node's best block, and update Status.height.
+	_, nodeHeight, err := c.nodeClient.GetBestBlock()
+	if err != nil {
+		c.Status.SetReady(false)
+		return fmt.Errorf("node: getbestblock failed: %v", err)
+	}
+
+	// Update Status.height with current node height. This also sets
+	// Status.ready according to the previously-set Status.dbHeight.
+	c.Status.SetHeight(uint32(nodeHeight))
+
+	return nil
+}
+
+// UpdateNodeHeight updates the Status height. This method satisfies
+// notification.BlockHandlerLite.
+func (c *appContext) UpdateNodeHeight(height uint32, _ string) error {
+	c.Status.SetHeight(height)
+	return nil
 }
 
 // StatusNtfnHandler keeps the appContext's Status up-to-date with changes in
 // node and DB status.
-func (c *appContext) StatusNtfnHandler(ctx context.Context, wg *sync.WaitGroup) {
+func (c *appContext) StatusNtfnHandler(ctx context.Context, wg *sync.WaitGroup, wireHeightChan chan uint32) {
 	defer wg.Done()
+	// Check the node connection count periodically.
+	rpcCheckTicker := time.NewTicker(5 * time.Second)
 out:
 	for {
 	keepon:
 		select {
-		case height, ok := <-notify.NtfnChans.UpdateStatusNodeHeight:
-			if !ok {
-				log.Warnf("Block connected channel closed.")
-				break out
-			}
-
-			nodeConnections, err := c.nodeClient.GetConnectionCount()
-			if err == nil {
-				c.Status.SetHeightAndConnections(height, nodeConnections)
-			} else {
-				c.Status.SetHeight(height)
-				c.Status.SetReady(false)
-				log.Warn("Failed to get connection count: ", err)
+		case <-rpcCheckTicker.C:
+			if err := c.updateNodeConnections(); err != nil {
+				log.Warn("updateNodeConnections: ", err)
 				break keepon
 			}
 
-		case height, ok := <-notify.NtfnChans.UpdateStatusDBHeight:
+		case height, ok := <-wireHeightChan:
 			if !ok {
 				log.Warnf("Block connected channel closed.")
 				break out
@@ -211,7 +250,7 @@ out:
 				break keepon
 			}
 
-			c.Status.DBUpdate(height, summary.Time.S.UNIX())
+			c.Status.DBUpdate(height, summary.Time.UNIX())
 
 			bdHeight, err := c.BlockData.GetHeight()
 			// Catch certain pathological conditions.
@@ -232,6 +271,7 @@ out:
 
 		case <-ctx.Done():
 			log.Debugf("Got quit signal. Exiting block connected handler for STATUS monitor.")
+			rpcCheckTicker.Stop()
 			break out
 		}
 	}
@@ -250,7 +290,12 @@ func (c *appContext) writeJSONHandlerFunc(thing interface{}) http.HandlerFunc {
 }
 
 func writeJSON(w http.ResponseWriter, thing interface{}, indent string) {
+	writeJSONWithStatus(w, thing, http.StatusOK, indent)
+}
+
+func writeJSONWithStatus(w http.ResponseWriter, thing interface{}, code int, indent string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", indent)
 	if err := encoder.Encode(thing); err != nil {
@@ -337,6 +382,16 @@ func (c *appContext) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, c.Status.API(), c.getIndentQuery(r))
 }
 
+func (c *appContext) statusHappy(w http.ResponseWriter, r *http.Request) {
+	happy := c.Status.Happy()
+	statusCode := http.StatusOK
+	if !happy.Happy {
+		// For very simple health checks, set the status code.
+		statusCode = http.StatusServiceUnavailable
+	}
+	writeJSONWithStatus(w, happy, statusCode, c.getIndentQuery(r))
+}
+
 func (c *appContext) coinSupply(w http.ResponseWriter, r *http.Request) {
 	supply := c.BlockData.CoinSupply()
 	if supply == nil {
@@ -353,17 +408,6 @@ func (c *appContext) currentHeight(w http.ResponseWriter, _ *http.Request) {
 	if _, err := io.WriteString(w, strconv.Itoa(int(c.Status.Height()))); err != nil {
 		apiLog.Infof("failed to write height response: %v", err)
 	}
-}
-
-func (c *appContext) getLatestBlock(w http.ResponseWriter, r *http.Request) {
-	latestBlockSummary := c.BlockData.GetBestBlockSummary()
-	if latestBlockSummary == nil {
-		apiLog.Error("Unable to get latest block summary")
-		http.Error(w, http.StatusText(422), 422)
-		return
-	}
-
-	writeJSON(w, latestBlockSummary, c.getIndentQuery(r))
 }
 
 func (c *appContext) getBlockHeight(w http.ResponseWriter, r *http.Request) {
@@ -872,23 +916,6 @@ func (c *appContext) getTransactionOutput(w http.ResponseWriter, r *http.Request
 	writeJSON(w, *allTxOut[index], c.getIndentQuery(r))
 }
 
-func (c *appContext) getBlockFeeInfo(w http.ResponseWriter, r *http.Request) {
-	idx, err := c.getBlockHeightCtx(r)
-	if err != nil {
-		http.Error(w, http.StatusText(422), 422)
-		return
-	}
-
-	blockFeeInfo := c.BlockData.GetFeeInfo(int(idx))
-	if blockFeeInfo == nil {
-		apiLog.Errorf("Unable to get block %d fee info", idx)
-		http.Error(w, http.StatusText(422), 422)
-		return
-	}
-
-	writeJSON(w, blockFeeInfo, c.getIndentQuery(r))
-}
-
 // getBlockStakeInfoExtendedByHash retrieves the apitype.StakeInfoExtended
 // for the given blockhash
 func (c *appContext) getBlockStakeInfoExtendedByHash(w http.ResponseWriter, r *http.Request) {
@@ -1013,7 +1040,7 @@ func (c *appContext) getSSTxDetails(w http.ResponseWriter, r *http.Request) {
 // getTicketPoolCharts pulls the initial data to populate the /ticketpool page
 // charts.
 func (c *appContext) getTicketPoolCharts(w http.ResponseWriter, r *http.Request) {
-	timeChart, priceChart, donutChart, height, err := c.AuxDataSource.TicketPoolVisualization(dbtypes.AllGrouping)
+	timeChart, priceChart, outputsChart, height, err := c.AuxDataSource.TicketPoolVisualization(dbtypes.AllGrouping)
 	if dbtypes.IsTimeoutErr(err) {
 		apiLog.Errorf("TicketPoolVisualization: %v", err)
 		http.Error(w, "Database timeout.", http.StatusServiceUnavailable)
@@ -1028,11 +1055,11 @@ func (c *appContext) getTicketPoolCharts(w http.ResponseWriter, r *http.Request)
 	mp := c.BlockData.GetMempoolPriceCountTime()
 
 	response := &apitypes.TicketPoolChartsData{
-		ChartHeight: uint64(height),
-		TimeChart:   timeChart,
-		PriceChart:  priceChart,
-		DonutChart:  donutChart,
-		Mempool:     mp,
+		ChartHeight:  uint64(height),
+		TimeChart:    timeChart,
+		PriceChart:   priceChart,
+		OutputsChart: outputsChart,
+		Mempool:      mp,
 	}
 
 	writeJSON(w, response, c.getIndentQuery(r))
@@ -1074,6 +1101,13 @@ func (c *appContext) getTicketPoolByDate(w http.ResponseWriter, r *http.Request)
 }
 
 func (c *appContext) getProposalChartData(w http.ResponseWriter, r *http.Request) {
+	if c.isPiDisabled {
+		errMsg := "piparser is disabled."
+		apiLog.Errorf("%s. Remove the disable-piparser flag to activate it.", errMsg)
+		http.Error(w, errMsg, http.StatusServiceUnavailable)
+		return
+	}
+
 	token := m.GetProposalTokenCtx(r)
 	votesData, err := c.AuxDataSource.ProposalVotes(token)
 	if dbtypes.IsTimeoutErr(err) {
@@ -1560,11 +1594,16 @@ func (c *appContext) getAddressTxAmountFlowData(w http.ResponseWriter, r *http.R
 
 func (c *appContext) ChartTypeData(w http.ResponseWriter, r *http.Request) {
 	chartType := m.GetChartTypeCtx(r)
-	zoom := r.URL.Query().Get("zoom")
-	chartData, err := c.charts.Chart(chartType, zoom)
+	bin := r.URL.Query().Get("bin")
+	// Support the deprecated URL parameter "zoom".
+	if bin == "" {
+		bin = r.URL.Query().Get("zoom")
+	}
+	axis := r.URL.Query().Get("axis")
+	chartData, err := c.charts.Chart(chartType, bin, axis)
 	if err != nil {
 		http.NotFound(w, r)
-		log.Warnf(`Error fetching chart %s at zoom level '%s': %v`, chartType, zoom, err)
+		log.Warnf(`Error fetching chart %s at bin level '%s': %v`, chartType, bin, err)
 		return
 	}
 	writeJSONBytes(w, chartData)

@@ -22,11 +22,14 @@ const (
 	tickerSigReset int = iota
 	tickerSigStop
 
+	// NewTxBufferSize is the maximum length of the new transaction slice sent
+	// to websocket clients.
+	NewTxBufferSize = 5
+
 	bufferTickerInterval = 3
-	NewTxBufferSize      = 5
 	clientSignalSize     = 5
 
-	MaxPayloadBytes = 1 << 20
+	maxPayloadBytes = 1 << 20
 )
 
 // Type aliases for the different HubSignals.
@@ -194,7 +197,7 @@ func NewWebsocketHub() *WebsocketHub {
 		HubRelay:         make(chan pstypes.HubMessage),
 		bufferTickerChan: make(chan int, clientSignalSize),
 		quitWSHandler:    make(chan struct{}),
-		requestLimit:     MaxPayloadBytes, // 1 MB
+		requestLimit:     maxPayloadBytes, // 1 MB
 	}
 }
 
@@ -283,10 +286,7 @@ func (wsh *WebsocketHub) pingClients() chan<- struct{} {
 			select {
 			case <-ticker.C:
 				wsh.HubRelay <- pstypes.HubMessage{Signal: sigPingAndUserCount}
-			case _, ok := <-stopPing:
-				if ok {
-					log.Errorf("Do not send on stopPing channel, only close it.")
-				}
+			case <-stopPing:
 				return
 			}
 		}
@@ -298,10 +298,9 @@ func (wsh *WebsocketHub) pingClients() chan<- struct{} {
 // Stop kills the run() loop and unregisters all clients (connections).
 func (wsh *WebsocketHub) Stop() {
 	// End the run() loop, allowing in progress operations to complete.
-	wsh.quitWSHandler <- struct{}{}
-	// Lastly close the hub relay channel sine the quitWSHandler signal is
-	// handled in the Run loop.
-	close(wsh.HubRelay)
+	close(wsh.quitWSHandler)
+	// Do not close HubRelay since there are multiple senders; Run() is the
+	// receiver.
 }
 
 // Run starts the main event loop, which handles the following: 1. receiving
@@ -373,7 +372,7 @@ func (wsh *WebsocketHub) Run() {
 					continue
 				}
 				log.Tracef("Received new tx %s. Queueing in each client's send buffer...", newtx.Hash)
-				someTxBuffersReady = wsh.MaybeSendTxns(newtx)
+				someTxBuffersReady = wsh.maybeSendTxns(newtx)
 			case sigSubscribe, sigUnsubscribe:
 				log.Warnf("sigSubscribe and sigUnsubscribe are not broadcastable events.")
 				continue // break events
@@ -429,13 +428,7 @@ func (wsh *WebsocketHub) Run() {
 		case c := <-wsh.Unregister:
 			wsh.unregisterClient(c)
 
-		case _, ok := <-wsh.quitWSHandler:
-			if !ok {
-				log.Error("close channel already closed. This should not happen.")
-				return
-			}
-			close(wsh.quitWSHandler)
-
+		case <-wsh.quitWSHandler:
 			// End the buffer interval send loop,
 			wsh.bufferTickerChan <- tickerSigStop
 
@@ -446,10 +439,10 @@ func (wsh *WebsocketHub) Run() {
 	} // for {
 }
 
-// MaybeSendTxns adds a mempool transaction to the client broadcast buffer. If
+// maybeSendTxns adds a mempool transaction to the client broadcast buffer. If
 // the buffer is at capacity, a goroutine is launched to signal for the
 // transactions to be sent to the clients.
-func (wsh *WebsocketHub) MaybeSendTxns(tx *exptypes.MempoolTx) (someReadyToSend bool) {
+func (wsh *WebsocketHub) maybeSendTxns(tx *exptypes.MempoolTx) (someReadyToSend bool) {
 	// addTxToBuffer adds the transaction to each client's tx buffer, and
 	// indicates if at least one client has a buffer at or above the send limit.
 	someReadyToSend = wsh.addTxToBuffer(tx)

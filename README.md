@@ -1,8 +1,11 @@
 # bitumdata
 
+[![Build Status](https://img.shields.io/travis/bitum-project/bitumdata.svg)](https://travis-ci.org/bitum-project/bitumdata)
+[![Latest tag](https://img.shields.io/github/tag/bitum-project/bitumdata.svg)](https://github.com/bitum-project/bitumdata/tags)
+[![Go Report Card](https://goreportcard.com/badge/github.com/bitum-project/bitumdata)](https://goreportcard.com/report/github.com/bitum-project/bitumdata)
 [![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
 
-bitumdata is an original [Bitum](https://bitum.io/) block explorer, with
+bitumdata is an original [Bitum](https://www.bitum.io/) block explorer, with
 packages and apps for data collection, presentation, and storage. The backend
 and middleware are written in Go. On the front end, Webpack enables the use of
 modern javascript features, as well as SCSS for styling.
@@ -24,11 +27,12 @@ modern javascript features, as well as SCSS for styling.
     - [From v2.x or earlier](#from-v2x-or-earlier)
   - [Getting Started](#getting-started)
     - [Configuring PostgreSQL (**IMPORTANT!** Seriously, read this.)](#configuring-postgresql-important-seriously-read-this)
+    - [CockroachDB Support (experimental)](#cockroachdb-support-experimental)
     - [Creating the bitumdata Configuration File](#creating-the-bitumdata-configuration-file)
     - [Using Environment Variables for Configuration](#using-environment-variables-for-configuration)
     - [Indexing the Blockchain](#indexing-the-blockchain)
     - [Starting bitumdata](#starting-bitumdata)
-    - [Hiding the PostgreSQL db Configuration settings.](#hiding-the-postgresql-db-configuration-settings)
+    - [Hiding the PostgreSQL Settings Table](#hiding-the-postgresql-settings-table)
     - [Running the Web Interface During Synchronization](#running-the-web-interface-during-synchronization)
   - [System Hardware Requirements](#system-hardware-requirements)
     - [bitumdata only (PostgreSQL on other host)](#bitumdata-only-postgresql-on-other-host)
@@ -61,9 +65,9 @@ Always run the Current release or on the Current stable branch. Do not use `mast
 
 |               | Series         | Branch         | Latest release tag |
 | ------------- | -------------- | -------------- | ------------------ |
-| Current       | 4.1            | `4.1-stable`   | `release-v4.1.0`   |
-| Legacy        | 4.0            | `4.0-stable`   | `v4.0.2`           |
-| Development   | 5.0            | `master`       | N/A                |
+| Current       | 5.0            | `5.0-stable`   | `release-v5.0.0`   |
+| Legacy        | 4.1            | `4.1-stable`   | `release-v4.1.4`   |
+| Development   | 5.1            | `master`       | N/A                |
 
 ## Repository Overview
 
@@ -131,15 +135,16 @@ Always run the Current release or on the Current stable branch. Do not use `mast
 
 ## Requirements
 
-- [Go](http://golang.org) 1.11.6+ or 1.12.1+.
-- [Node.js](https://nodejs.org/en/download/) 10.x or 11.x. Node.js is only used
+- [Go](http://golang.org) 1.11.10+ or 1.12.5+.
+- [Node.js](https://nodejs.org/en/download/) 11.x or 12.x. Node.js is only used
   as a build tool, and is **not used at runtime**.
 - Running `bitumd` running with `--txindex --addrindex`, and synchronized to the
   current best block on the network. On startup, bitumdata will verify that the
   bitumd version is compatible. bitumdata v3.1.x and later required bitumd v1.4.x or a
   later version with JSON-RPC server version 5.x.y.
-- (For "full" mode) PostgreSQL 10.5+. Version 11.x is supported and recommended
-  for improved performance with a number of tasks.
+- PostgreSQL 10.5+. Version 11.x is supported and recommended for improved
+  performance with a number of tasks. Support for CockroachDB is an experimental
+  feature. See [CockroachDB Support (experimental)](#cockroachdb-support-experimental) for details.
 
 ## Docker Support
 
@@ -249,8 +254,8 @@ desirable to set the "pre" and "dev" values to different strings, such as
 
 ```sh
 GO111MODULE=on go build -o bitumdata -v -ldflags \
-    "-X github.com/bitum-project/bitumdata/version.appPreRelease=beta \
-     -X github.com/bitum-project/bitumdata/version.appBuild=`git rev-parse --short HEAD`"
+    "-X github.com/bitum-project/bitumdata/v5/version.appPreRelease=beta \
+     -X github.com/bitum-project/bitumdata/v5/version.appBuild=`git rev-parse --short HEAD`"
 ```
 
 This produces a string like `bitumdata version 4.0.0-beta+25777e23 (Go version go1.12.1)`.
@@ -326,9 +331,8 @@ automatic migration. The tables must be rebuilt from scratch:
 
 ### Configuring PostgreSQL (**IMPORTANT!** Seriously, read this.)
 
-If you intend to run bitumdata in "full" mode (i.e. with the `--pg` switch), which
-uses a PostgreSQL database backend, it is crucial that you configure your
-PostgreSQL server for your hardware and the bitumdata workload.
+It is crucial that you configure your PostgreSQL server for your hardware and
+the bitumdata workload.
 
 Read [postgresql-tuning.conf](./db/bitumpg/postgresql-tuning.conf) carefully for
 details on how to make the necessary changes to your system. A helpful online
@@ -345,6 +349,23 @@ complain).
 On Linux, you may wish to use a unix domain socket instead of a TCP connection.
 The path to the socket depends on the system, but it is commonly
 `/var/run/postgresql`. Just set this path in `pghost`.
+
+### CockroachDB Support (experimental)
+
+While bitumdata now provides [support for CockroachDB](https://github.com/bitum-project/bitumdata/issues/1291),
+this is an experimental feature with caveats:
+
+- Compared to a well-configure PostgreSQL backend, CoackroachDB performance is
+  suboptimal. See the [CockroachDB issue](https://github.com/bitum-project/bitumdata/issues/1291)
+  for more information.
+- The bulk of the testing and performance optimization is done with PostgreSQL
+  in mind.
+
+If you decide to use CockroachDB with bitumdata, (1) do not do so in production
+and (2) expect some bugs and relatively poor performance.
+
+See [bitumdata's CockroachDB wiki page](https://github.com/bitum-project/bitumdata/wiki/CockroachDB)
+for more information.
 
 ### Creating the bitumdata Configuration File
 
@@ -419,10 +440,10 @@ Unlike bitumdata.conf, which must be placed in the `appdata` folder or explicitl
 set with `-C`, the "public" and "views" folders _must_ be in the same folder as
 the `bitumdata` executable.
 
-### Hiding the PostgreSQL db Configuration settings.
+### Hiding the PostgreSQL Settings Table
 
-By default postgres configuration settings are logged on system start up.
-`--hidepgconfig` flag blocks the logging on bitumdata start up.
+By default, postgres settings are displayed in a table on start up of bitumdata.
+To block display of this table, use the `--hidepgconfig` switch..
 
 ### Running the Web Interface During Synchronization
 
@@ -483,7 +504,6 @@ Recommend:
 - 8+ GB RAM
 - SSD (NVMe preferred) with 60 GB free space
 
-
 ## bitumdata Daemon
 
 The root of the repository is the `main` package for the `bitumdata` app, which
@@ -534,7 +554,7 @@ the `/api` path prefix.
 
 | Best block           | Path                                | Type                                  |
 | -------------------- | ----------------------------------- | ------------------------------------- |
-| Summary              | `/block/best?txtotals=[true\|false]` | `types.BlockDataBasic`                |
+| Summary              | `/block/best?txtotals=[true|false]` | `types.BlockDataBasic`                |
 | Stake info           | `/block/best/pos`                   | `types.StakeInfoExtended`             |
 | Header               | `/block/best/header`                | `bitumjson.GetBlockHeaderVerboseResult` |
 | Raw Header (hex)     | `/block/best/header/raw`            | `string`                              |
@@ -863,11 +883,11 @@ here's the gist of it:
 
 **DO NOT merge from master to your feature branch; rebase.**
 
-Note that all bitumdata.org community and team members are expected to adhere to
+Note that all bitum.io community and team members are expected to adhere to
 the code of conduct, described in the [CODE_OF_CONDUCT](docs/CODE_OF_CONDUCT.md)
 file. These guidelines are generally not a challenge for decent humans.
 
-Also, [come chat with us on Matrix](https://bitum.io/matrix/) in the
+Also, [come chat with us on Matrix](https://www.bitum.io/matrix/) in the
 bitumdata channel!
 
 ## License
